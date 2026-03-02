@@ -1,0 +1,15 @@
+# CARLA Bridge Requirements (Python 3.7)
+# Install with: pip install -r requirements.txt
+
+# Core dependencies
+pyzmq>=25.0.0
+numpy>=1.21.0,<2.0.0
+opencv-python>=4.5.0
+Pillow>=8.0.0
+
+# CARLA (already installed in project)
+# carla==0.9.13
+
+# Utilities
+pyyaml>=5.4.0
+tqdm>=4.60.0
