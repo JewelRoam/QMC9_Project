@@ -37,167 +37,6 @@ except ImportError:
     print("[WARNING] numpy not installed, camera-based mode disabled. Install: pip install numpy")
 
 
-class UltrasonicSensor:
-    """
-    HC-SR04 Ultrasonic distance sensor for emergency safety layer.
-    Falls back to dummy mode if GPIO is unavailable (e.g., on PC for testing).
-    """
-
-    def __init__(self, trigger_pin: int = 23, echo_pin: int = 24):
-        self.trigger_pin = trigger_pin
-        self.echo_pin = echo_pin
-        self._gpio_available = False
-        self._last_distance = 999.0
-
-        try:
-            import RPi.GPIO as GPIO
-            self.GPIO = GPIO
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setup(trigger_pin, GPIO.OUT)
-            GPIO.setup(echo_pin, GPIO.IN)
-            GPIO.output(trigger_pin, False)
-            time.sleep(0.1)
-            self._gpio_available = True
-            print("[Ultrasonic] GPIO initialized")
-        except (ImportError, RuntimeError):
-            print("[Ultrasonic] GPIO not available, using dummy mode")
-
-    def measure_distance(self) -> float:
-        """Measure distance in meters. Returns 999.0 if unavailable."""
-        if not self._gpio_available:
-            return 999.0
-
-        try:
-            GPIO = self.GPIO
-            GPIO.output(self.trigger_pin, True)
-            time.sleep(0.00001)
-            GPIO.output(self.trigger_pin, False)
-
-            pulse_start = time.time()
-            timeout = pulse_start + 0.04  # 40ms timeout
-
-            while GPIO.input(self.echo_pin) == 0:
-                pulse_start = time.time()
-                if pulse_start > timeout:
-                    return 999.0
-
-            pulse_end = time.time()
-            timeout = pulse_end + 0.04
-
-            while GPIO.input(self.echo_pin) == 1:
-                pulse_end = time.time()
-                if pulse_end > timeout:
-                    return 999.0
-
-            distance = (pulse_end - pulse_start) * 34300 / 2 / 100  # meters
-            self._last_distance = distance
-            return distance
-        except Exception:
-            return self._last_distance
-
-    def cleanup(self):
-        if self._gpio_available:
-            self.GPIO.cleanup()
-
-
-class MotorDriver:
-    """
-    4WD Motor driver for Raspberry Pi expansion board.
-    Controls left and right motor groups via PWM.
-    Falls back to console output if GPIO unavailable.
-    """
-
-    # Default pin configuration for the 4WD robot expansion board
-    LEFT_FORWARD_PIN = 20
-    LEFT_BACKWARD_PIN = 21
-    RIGHT_FORWARD_PIN = 19
-    RIGHT_BACKWARD_PIN = 26
-    LEFT_PWM_PIN = 16
-    RIGHT_PWM_PIN = 13
-
-    def __init__(self):
-        self._gpio_available = False
-        self._left_pwm = None
-        self._right_pwm = None
-
-        try:
-            import RPi.GPIO as GPIO
-            self.GPIO = GPIO
-            GPIO.setmode(GPIO.BCM)
-
-            # Setup direction pins
-            for pin in [self.LEFT_FORWARD_PIN, self.LEFT_BACKWARD_PIN,
-                        self.RIGHT_FORWARD_PIN, self.RIGHT_BACKWARD_PIN]:
-                GPIO.setup(pin, GPIO.OUT)
-                GPIO.output(pin, False)
-
-            # Setup PWM pins
-            GPIO.setup(self.LEFT_PWM_PIN, GPIO.OUT)
-            GPIO.setup(self.RIGHT_PWM_PIN, GPIO.OUT)
-            self._left_pwm = GPIO.PWM(self.LEFT_PWM_PIN, 1000)
-            self._right_pwm = GPIO.PWM(self.RIGHT_PWM_PIN, 1000)
-            self._left_pwm.start(0)
-            self._right_pwm.start(0)
-
-            self._gpio_available = True
-            print("[Motor] GPIO motor driver initialized")
-        except (ImportError, RuntimeError):
-            print("[Motor] GPIO not available, using console output mode")
-
-    def drive(self, left_pwm: int, right_pwm: int, direction: str = "forward"):
-        """
-        Drive the motors.
-
-        Args:
-            left_pwm: 0-100 PWM duty cycle for left motors
-            right_pwm: 0-100 PWM duty cycle for right motors
-            direction: "forward", "backward", or "stop"
-        """
-        left_pwm = max(0, min(100, left_pwm))
-        right_pwm = max(0, min(100, right_pwm))
-
-        if not self._gpio_available:
-            if direction != "stop" and (left_pwm > 0 or right_pwm > 0):
-                print(f"[Motor] {direction} L={left_pwm} R={right_pwm}")
-            return
-
-        GPIO = self.GPIO
-
-        if direction == "stop":
-            GPIO.output(self.LEFT_FORWARD_PIN, False)
-            GPIO.output(self.LEFT_BACKWARD_PIN, False)
-            GPIO.output(self.RIGHT_FORWARD_PIN, False)
-            GPIO.output(self.RIGHT_BACKWARD_PIN, False)
-            self._left_pwm.ChangeDutyCycle(0)
-            self._right_pwm.ChangeDutyCycle(0)
-
-        elif direction == "forward":
-            GPIO.output(self.LEFT_FORWARD_PIN, True)
-            GPIO.output(self.LEFT_BACKWARD_PIN, False)
-            GPIO.output(self.RIGHT_FORWARD_PIN, True)
-            GPIO.output(self.RIGHT_BACKWARD_PIN, False)
-            self._left_pwm.ChangeDutyCycle(left_pwm)
-            self._right_pwm.ChangeDutyCycle(right_pwm)
-
-        elif direction == "backward":
-            GPIO.output(self.LEFT_FORWARD_PIN, False)
-            GPIO.output(self.LEFT_BACKWARD_PIN, True)
-            GPIO.output(self.RIGHT_FORWARD_PIN, False)
-            GPIO.output(self.RIGHT_BACKWARD_PIN, True)
-            self._left_pwm.ChangeDutyCycle(left_pwm)
-            self._right_pwm.ChangeDutyCycle(right_pwm)
-
-    def stop(self):
-        self.drive(0, 0, "stop")
-
-    def cleanup(self):
-        self.stop()
-        if self._gpio_available:
-            if self._left_pwm:
-                self._left_pwm.stop()
-            if self._right_pwm:
-                self._right_pwm.stop()
-            self.GPIO.cleanup()
 
 
 class CameraCapture:
@@ -227,6 +66,8 @@ class CameraCapture:
 
 
 def load_config(config_path: str = "config/config.yaml") -> dict:
+    if yaml is None:
+        raise RuntimeError("pyyaml is required. Install: pip install pyyaml")
     with open(config_path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
 
@@ -291,15 +132,16 @@ def main():
     # Initialize controller
     controller = VehicleController(config['control'], platform="raspberry_pi")
 
-    # Initialize hardware
+    # Initialize hardware (using modular drivers)
     print("[Init] Setting up hardware...")
-    ultrasonic = UltrasonicSensor(
-        trigger_pin=config.get('raspberry_pi', {}).get('ultrasonic', {}).get('trigger_pin', 23),
-        echo_pin=config.get('raspberry_pi', {}).get('ultrasonic', {}).get('echo_pin', 24),
-    )
-    emergency_dist = config.get('raspberry_pi', {}).get('ultrasonic', {}).get('emergency_distance', 0.15)
+    from rpi_deploy.motor_driver import MotorController
+    from rpi_deploy.ultrasonic_sensor import UltrasonicSensor
+    from rpi_deploy.hardware_config import hardware_config
 
-    motor = MotorDriver()
+    ultrasonic = UltrasonicSensor()
+    motor = MotorController()
+    emergency_dist = config.get('raspberry_pi', {}).get('ultrasonic', {}).get(
+        'emergency_distance', 0.15)
     camera = CameraCapture(args.camera, width=640, height=480)
 
     # V2V Cooperative mode
@@ -337,9 +179,9 @@ def main():
                 continue
 
             # 2. Ultrasonic safety check (highest priority)
-            ultra_dist = ultrasonic.measure_distance()
+            ultra_dist = ultrasonic.measure_once().distance_cm / 100.0  # cm → m
             if ultra_dist < emergency_dist:
-                motor.stop()
+                motor.emergency_stop()
                 print(f"[EMERGENCY] Ultrasonic: {ultra_dist:.3f}m - STOPPED")
                 time.sleep(0.5)
                 continue
@@ -408,11 +250,16 @@ def main():
 
             # 8. Motor control
             control = controller.compute_control(planner_output, 0.0)
-            motor.drive(
-                left_pwm=control['left_pwm'],
-                right_pwm=control['right_pwm'],
-                direction=control['direction'],
-            )
+            # Map planner output to MotorController API
+            direction = control.get('direction', 'forward')
+            speed = max(control.get('left_pwm', 0), control.get('right_pwm', 0)) / 100.0
+            speed = max(0.0, min(1.0, speed))
+            if direction == "forward":
+                motor.move_forward(speed)
+            elif direction == "backward":
+                motor.move_backward(speed)
+            else:
+                motor.stop()
 
             # 9. Display (if available)
             if show_display:
