@@ -118,23 +118,25 @@ http://192.168.137.33:8080
 
 ## 使用主控制程序
 
-### 基本避障模式
+### 避障模式（推荐）
 
 ```bash
 cd ~/QMC9_Project
 python3 -m rpi_deploy.rpi_car_controller --mode obstacle_avoidance
 ```
 
-### 协作模式（多车）
+### 摄像头+YOLO感知模式
 
 ```bash
-python3 -m rpi_deploy.rpi_car_controller --mode cooperative --v2v
+python3 -m rpi_deploy.rpi_car_controller --mode camera
+# 启用V2V协作
+python3 -m rpi_deploy.rpi_car_controller --mode camera --cooperative --pc-host 192.168.1.50
 ```
 
 ### 远程遥控模式
 
 ```bash
-python3 -m rpi_deploy.rpi_car_controller --mode remote
+python3 -m rpi_deploy.remote_control
 ```
 
 ## 避障模块 (obstacle_avoidance)
