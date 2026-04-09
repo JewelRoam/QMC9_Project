@@ -547,7 +547,7 @@ MODE_MAP = {
 }
 
 
-def main():
+def main(argv=None):
     """Command-line entry point for obstacle avoidance."""
     parser = argparse.ArgumentParser(
         description="Makerobo 4WD Robot – Obstacle Avoidance (rpi_deploy)"
@@ -557,7 +557,7 @@ def main():
         help="Avoidance mode: simple (front-only), servo (scan left/right), "
              "apf (potential-field). Default: servo",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     print()
     print("*" * 50)

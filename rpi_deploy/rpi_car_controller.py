@@ -18,13 +18,23 @@ Usage (on Raspberry Pi):
 import os
 import sys
 import time
-import yaml
 import argparse
 import threading
-import numpy as np
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+    print("[WARNING] pyyaml not installed, config loading disabled. Install: pip install pyyaml")
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
+    print("[WARNING] numpy not installed, camera-based mode disabled. Install: pip install numpy")
 
 
 class UltrasonicSensor:
@@ -223,6 +233,9 @@ def load_config(config_path: str = "config/config.yaml") -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="RPi Car Controller")
+    parser.add_argument("--mode", type=str, default="camera",
+                        choices=["camera", "obstacle_avoidance"],
+                        help="Run mode: 'camera' (YOLO+APF pipeline) or 'obstacle_avoidance' (ultrasonic only)")
     parser.add_argument("--cooperative", action="store_true",
                         help="Enable V2V cooperative mode with PC")
     parser.add_argument("--pc-host", default="192.168.1.50",
@@ -236,6 +249,18 @@ def main():
     parser.add_argument("--config", default="config/config.yaml",
                         help="Config file path")
     args = parser.parse_args()
+
+    # Delegate to obstacle_avoidance module if requested
+    if args.mode == "obstacle_avoidance":
+        from rpi_deploy.obstacle_avoidance import main as obstacle_main
+        # Strip our --mode arg so obstacle_avoidance's argparse works correctly
+        remaining = [a for a in sys.argv[1:] if a not in ("--mode", "obstacle_avoidance")]
+        obstacle_main(remaining if remaining else None)
+        return
+
+    if yaml is None:
+        print("[ERROR] pyyaml is required for camera mode. Install: pip install pyyaml")
+        sys.exit(1)
 
     config = load_config(args.config)
     print("=" * 50)
