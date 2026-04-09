@@ -65,6 +65,226 @@ class CameraCapture:
         self.cap.release()
 
 
+def _run_remote_mode(args):
+    """
+    Remote control mode – start TCP server, accept commands from PC client.
+    Motor, servo, and ultrasonic are controlled via network commands.
+    """
+    from rpi_deploy.motor_driver import MotorController
+    from rpi_deploy.servo_controller import ServoController
+    from rpi_deploy.ultrasonic_sensor import UltrasonicSensor
+    from rpi_deploy.remote_control import RemoteControlServer, VehicleStatus
+
+    print("=" * 50)
+    print("  Mode: REMOTE control (TCP server)")
+    print("=" * 50)
+
+    motor = MotorController()
+    servo = ServoController()
+    sensor = UltrasonicSensor()
+    server = RemoteControlServer()
+
+    # --- Command handlers ---
+    def handle_move(params):
+        direction = params.get("direction", "stop")
+        speed = params.get("speed", 50) / 100.0  # percentage → 0-1
+        speed = max(0.0, min(1.0, speed))
+        if direction == "forward":
+            motor.move_forward(speed)
+        elif direction == "backward":
+            motor.move_backward(speed)
+        elif direction == "left":
+            motor.rotate_left(speed)
+        elif direction == "right":
+            motor.rotate_right(speed)
+        else:
+            motor.stop()
+        return f"Moved {direction} at {speed:.2f}"
+
+    def handle_stop(params):
+        motor.stop()
+        return "Stopped"
+
+    def handle_servo(params):
+        servo_type = params.get("type", "ultrasonic")
+        angle = params.get("angle", 90)
+        if servo_type == "ultrasonic":
+            servo.set_ultrasonic_angle(angle)
+        elif servo_type == "camera_pan":
+            servo.set_camera_pan(angle)
+        elif servo_type == "camera_tilt":
+            servo.set_camera_tilt(angle)
+        return f"Servo {servo_type} set to {angle}"
+
+    def handle_scan(params):
+        reading = sensor.measure_average(samples=3)
+        return {"distance_cm": reading.distance_cm, "valid": reading.valid}
+
+    def handle_auto(params):
+        """Switch to autonomous obstacle avoidance mode."""
+        from rpi_deploy.obstacle_avoidance import ObstacleAvoidanceController, mode_servo
+        ctrl = ObstacleAvoidanceController()
+        ctrl.start()
+        # Run avoidance in a background thread
+        avoidance_thread = threading.Thread(target=mode_servo, args=(ctrl,), daemon=True)
+        avoidance_thread.start()
+        return "Auto mode started"
+
+    server.register_handler("move", handle_move)
+    server.register_handler("stop", handle_stop)
+    server.register_handler("servo", handle_servo)
+    server.register_handler("scan", handle_scan)
+    server.register_handler("auto", handle_auto)
+
+    # --- Status provider ---
+    _status_state = {"direction": "STOP"}
+
+    def _update_direction(name: str):
+        _status_state["direction"] = name
+
+    # Override handle_move to also track direction
+    _orig_handle_move = handle_move
+
+    def handle_move_with_status(params):
+        direction = params.get("direction", "stop")
+        _update_direction(direction.upper() if direction != "stop" else "STOP")
+        return _orig_handle_move(params)
+
+    def handle_stop_with_status(params):
+        _update_direction("STOP")
+        return handle_stop(params)
+
+    # Re-register with direction tracking
+    server.register_handler("move", handle_move_with_status)
+    server.register_handler("stop", handle_stop_with_status)
+
+    def get_status() -> VehicleStatus:
+        reading = sensor.measure_once()
+        return VehicleStatus(
+            direction=_status_state["direction"],
+            obstacle_distance=reading.distance_cm if reading.valid else 999.0,
+            ultrasonic_angle=servo._ultrasonic_angle,
+            camera_pan=servo._camera_pan,
+            camera_tilt=servo._camera_tilt,
+            timestamp=time.time(),
+        )
+
+    server.register_status_provider(get_status)
+    server.start()
+
+    print("[Remote] Server running. Press Ctrl+C to stop.")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n[Remote] Interrupted")
+    finally:
+        motor.cleanup()
+        servo.cleanup()
+        sensor.cleanup()
+        server.stop()
+        print("[Remote] Cleanup done")
+
+
+def _run_v2v_mode(args):
+    """
+    V2V cooperative avoidance mode – ultrasonic avoidance + V2V communication.
+    Runs servo-enhanced avoidance while broadcasting/receiving V2V messages
+    with a PC peer for cooperative perception.
+    """
+    from rpi_deploy.obstacle_avoidance import ObstacleAvoidanceController
+    from rpi_deploy.motor_driver import MotorController
+    from rpi_deploy.ultrasonic_sensor import UltrasonicSensor
+    from rpi_deploy.servo_controller import ServoController
+    from cooperation.v2v_message import V2VCommunicator, SharedDetection
+
+    print("=" * 50)
+    print("  Mode: V2V cooperative avoidance")
+    print(f"  PC peer: {args.pc_host}:{args.pc_port}")
+    print("=" * 50)
+
+    ctrl = ObstacleAvoidanceController()
+    motor = ctrl.motor
+    sensor = ctrl.sensor
+    servo = ctrl.servo
+
+    # V2V communicator
+    comm_config = {"protocol": "socket", "max_latency_ms": 200, "dropout_rate": 0.0}
+    v2v = V2VCommunicator("rpi_vehicle_1", comm_config)
+    v2v.start_socket_server(port=args.pc_port + 1)
+    v2v.add_socket_peer("pc_vehicle", args.pc_host, args.pc_port)
+    print(f"[V2V] Socket server on port {args.pc_port + 1}, peer at {args.pc_host}:{args.pc_port}")
+
+    # Obstacle thresholds
+    OBSTACLE_CM = 50.0
+    SAFE_CM = 30.0
+    SERVO_SETTLE = 0.4
+
+    ctrl.wait_for_start()
+
+    try:
+        while ctrl.is_running:
+            # Scan three directions
+            dist_front = ctrl.scan_front_cm()
+            dist_left = ctrl.scan_left_cm()
+            dist_right = ctrl.scan_right_cm()
+
+            # V2V: broadcast our status
+            our_detections = []
+            if dist_front < OBSTACLE_CM:
+                our_detections.append(SharedDetection(
+                    class_name="ultrasonic_obstacle", category="obstacle",
+                    confidence=1.0, world_x=dist_front / 100.0,
+                    world_y=0.0, distance_from_sender=dist_front / 100.0))
+            msg = v2v.create_message(
+                position=(0, 0, 0), velocity=(0, 0),
+                detections=our_detections,
+                intent="cruising" if dist_front > OBSTACLE_CM else "yielding",
+            )
+            v2v.broadcast(msg)
+
+            # V2V: receive peer detections
+            v2v_msgs = v2v.receive_all()
+            v2v_obstacle = False
+            for vid, vmsg in v2v_msgs.items():
+                for sd in vmsg.detections:
+                    if sd.distance_from_sender < SAFE_CM / 100.0:
+                        v2v_obstacle = True
+
+            # Decision: local + V2V
+            if dist_front < OBSTACLE_CM or v2v_obstacle:
+                ctrl.stop()
+                time.sleep(0.2)
+                if v2v_obstacle:
+                    print("[V2V] Peer reports nearby obstacle – yielding")
+                ctrl.backward(0.3)
+                time.sleep(0.5)
+                ctrl.stop()
+
+                # Choose direction
+                if dist_left > dist_right and dist_left > OBSTACLE_CM:
+                    ctrl.left(0.3)
+                elif dist_right > OBSTACLE_CM:
+                    ctrl.right(0.3)
+                else:
+                    ctrl.left(0.3)  # default pivot
+                time.sleep(0.5)
+                ctrl.stop()
+                ctrl.scan_front_cm()
+            else:
+                ctrl.forward(0.15)
+
+            print(f"[V2V] F={dist_front:.0f} L={dist_left:.0f} R={dist_right:.0f} cm | "
+                  f"Peers={len(v2v_msgs)} | V2V_obs={v2v_obstacle}")
+            time.sleep(0.3)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        ctrl.cleanup()
+        print("[V2V] Cleanup done")
+
+
 def load_config(config_path: str = "config/config.yaml") -> dict:
     if yaml is None:
         raise RuntimeError("pyyaml is required. Install: pip install pyyaml")
@@ -75,8 +295,9 @@ def load_config(config_path: str = "config/config.yaml") -> dict:
 def main():
     parser = argparse.ArgumentParser(description="RPi Car Controller")
     parser.add_argument("--mode", type=str, default="camera",
-                        choices=["camera", "obstacle_avoidance"],
-                        help="Run mode: 'camera' (YOLO+APF pipeline) or 'obstacle_avoidance' (ultrasonic only)")
+                        choices=["camera", "obstacle_avoidance", "remote", "v2v"],
+                        help="Run mode: 'camera' (YOLO+APF), 'obstacle_avoidance' (ultrasonic), "
+                             "'remote' (network control), 'v2v' (cooperative avoidance)")
     parser.add_argument("--cooperative", action="store_true",
                         help="Enable V2V cooperative mode with PC")
     parser.add_argument("--pc-host", default="192.168.1.50",
@@ -98,6 +319,16 @@ def main():
         # Always pass a list (even empty) so argparse uses it instead of sys.argv
         remaining = [a for a in sys.argv[1:] if a not in ("--mode", "obstacle_avoidance")]
         obstacle_main(remaining)
+        return
+
+    # Delegate to remote control mode
+    if args.mode == "remote":
+        _run_remote_mode(args)
+        return
+
+    # Delegate to V2V cooperative avoidance mode
+    if args.mode == "v2v":
+        _run_v2v_mode(args)
         return
 
     if yaml is None:

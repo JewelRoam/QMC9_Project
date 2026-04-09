@@ -125,18 +125,40 @@ cd ~/QMC9_Project
 python3 -m rpi_deploy.rpi_car_controller --mode obstacle_avoidance
 ```
 
+### 远程遥控模式
+
+启动TCP服务器，接受PC客户端的遥控命令（方向、速度、舵机、超声波扫描）：
+
+```bash
+python3 -m rpi_deploy.rpi_car_controller --mode remote
+```
+
+PC端客户端控制：
+```python
+from rpi_deploy.remote_control import RemoteControlClient
+client = RemoteControlClient("192.168.137.33")  # 树莓派IP
+client.connect()
+client.move_forward(speed=50)   # speed: 0-100
+client.turn_left(speed=30)
+client.stop()
+client.set_servo("ultrasonic", 90)
+client.get_status()             # 获取车辆状态
+```
+
+### V2V协作避障模式
+
+超声波避障 + V2V通信，与PC端共享障碍物检测信息，实现协作避让：
+
+```bash
+python3 -m rpi_deploy.rpi_car_controller --mode v2v --pc-host 192.168.1.50 --pc-port 5555
+```
+
 ### 摄像头+YOLO感知模式
 
 ```bash
 python3 -m rpi_deploy.rpi_car_controller --mode camera
 # 启用V2V协作
 python3 -m rpi_deploy.rpi_car_controller --mode camera --cooperative --pc-host 192.168.1.50
-```
-
-### 远程遥控模式
-
-```bash
-python3 -m rpi_deploy.remote_control
 ```
 
 ## 避障模块 (obstacle_avoidance)
