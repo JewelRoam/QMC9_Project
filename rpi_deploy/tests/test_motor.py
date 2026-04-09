@@ -16,11 +16,12 @@ Motor Driver Test Script
 """
 
 import sys
+import os
 import time
 import argparse
 
-# 添加父目录到路径
-sys.path.insert(0, '/home/pi/QMC9_Project')
+# Dynamically resolve project root (works on any machine)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 try:
     from rpi_deploy.motor_driver import MotorController, Direction

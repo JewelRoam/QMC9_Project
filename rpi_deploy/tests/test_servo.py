@@ -15,10 +15,12 @@ Servo Controller Test Script
 """
 
 import sys
+import os
 import time
 import argparse
 
-sys.path.insert(0, '/home/pi/QMC9_Project')
+# Dynamically resolve project root (works on any machine)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 try:
     from rpi_deploy.servo_controller import ServoController
