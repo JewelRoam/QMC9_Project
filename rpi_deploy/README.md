@@ -46,7 +46,9 @@ rpi_deploy/
 ├── camera_driver.py         # USB摄像头驱动
 ├── obstacle_avoidance.py    # 三模式避障（simple/servo/apf）
 ├── remote_control.py        # 网络远程控制
-├── rpi_car_controller.py    # 主控制程序（原有）
+├── pc_remote_controller.py  # PC端键盘遥控客户端
+├── pc_v2v_coordinator.py    # PC端V2V协作协调器
+├── rpi_car_controller.py    # 主控制程序
 └── tests/                   # 硬件测试脚本
     ├── __init__.py
     ├── test_motor.py        # 电机测试
@@ -152,6 +154,57 @@ client.get_status()             # 获取车辆状态
 ```bash
 python3 -m rpi_deploy.rpi_car_controller --mode v2v --pc-host 192.168.1.50 --pc-port 5555
 ```
+
+---
+
+## PC端控制脚本
+
+### PC端键盘遥控（pc_remote_controller.py）
+
+在PC上运行交互式键盘遥控客户端，通过TCP控制树莓派小车：
+
+```bash
+python -m rpi_deploy.pc_remote_controller --host 192.168.137.33
+python -m rpi_deploy.pc_remote_controller --host 192.168.137.33 --port 5000
+```
+
+键盘控制映射：
+
+| 按键 | 功能 | 按键 | 功能 |
+|------|------|------|------|
+| W / ↑ | 前进 | S / ↓ | 后退 |
+| A / ← | 左转 | D / → | 右转 |
+| Space | 停止 | Q / Esc | 退出 |
+| 1-5 | 速度档位(20%-100%) | +/- | 增减速度 |
+| U / J | 超声波舵机 左/右 | I / O | 摄像头水平 左/右 |
+| K / L | 摄像头俯仰 上/下 | C | 所有舵机归中 |
+| R | 查询状态 | P | 超声波扫描 |
+| M | 切换自动避障模式 | H | 帮助 |
+
+### PC端V2V协作协调器（pc_v2v_coordinator.py）
+
+在PC上运行V2V协调器，接收RPi障碍物检测并共享PC端感知结果：
+
+```bash
+# 独立监控模式（无摄像头）
+python -m rpi_deploy.pc_v2v_coordinator --rpi-host 192.168.137.33
+
+# 带摄像头+YOLO检测模式
+python -m rpi_deploy.pc_v2v_coordinator --rpi-host 192.168.137.33 --camera
+
+# 自定义端口
+python -m rpi_deploy.pc_v2v_coordinator --rpi-host 192.168.1.10 --port 5555
+```
+
+通信架构：
+```
+RPi (v2v mode) ←──UDP──→ PC (pc_v2v_coordinator)
+  ├─ RPi广播: 超声波检测结果、行驶意图、位置
+  ├─ PC广播: 摄像头/YOLO检测结果、协作请求
+  └─ 双向: V2VCommunicator socket模式
+```
+
+---
 
 ### 摄像头+YOLO感知模式
 
