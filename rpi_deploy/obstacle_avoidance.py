@@ -50,11 +50,11 @@ OBSTACLE_DISTANCE_CM = hardware_config.control.warning_distance_cm   # 50cm warn
 SAFE_DISTANCE_CM = hardware_config.control.safe_distance_cm          # 30cm safe
 EMERGENCY_DISTANCE_CM = 15.0  # emergency stop
 
-# Speed settings (percentage, 0-100, matching MotorController convention)
-FORWARD_SPEED = 25.0       # cruising speed %
-AVOID_SPEED = 35.0         # turning / reversing speed %
-APF_FORWARD_SPEED = 30.0   # APF mode cruising speed %
-APF_TURN_SPEED = 40.0      # APF mode turning speed %
+# Speed settings (0.0-1.0, matching gpiozero.Robot convention)
+FORWARD_SPEED = 0.15       # cruising speed (case 6: 0.15, case 7: 0.2)
+AVOID_SPEED = 0.3          # turning / reversing speed
+APF_FORWARD_SPEED = 0.2    # APF mode cruising speed
+APF_TURN_SPEED = 0.3       # APF mode turning speed
 
 # Timing (seconds)
 SERVO_SETTLE_TIME = 0.4    # wait for servo to reach position
@@ -442,7 +442,7 @@ class SimpleAPFController:
         # Speed proportional to forward component
         speed_factor = max(fx / (self.K_ATT + 1.0), 0.0)
         speed = APF_FORWARD_SPEED * speed_factor
-        speed = max(speed, 10.0)  # minimum crawling speed
+        speed = max(speed, 0.05)  # minimum crawling speed
 
         # Classify angle into action
         if abs(force_angle) < 30:
@@ -467,7 +467,7 @@ class SimpleAPFController:
 
 
 # APF mode specific speed
-APF_AVOID_SPEED = 35.0
+APF_AVOID_SPEED = 0.3
 
 
 def mode_apf(ctrl: ObstacleAvoidanceController):
@@ -527,7 +527,7 @@ def mode_apf(ctrl: ObstacleAvoidanceController):
 
             # --- Log ---
             print(f"[APF] F={dist_front:.0f} L={dist_left:.0f} R={dist_right:.0f} cm | "
-                  f"action={action} speed={speed:.1f}% state={cmd['state']} | "
+                  f"action={action} speed={speed:.2f} state={cmd['state']} | "
                   f"fx={cmd['fx']:.2f} fy={cmd['fy']:.2f}")
 
     except KeyboardInterrupt:

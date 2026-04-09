@@ -148,8 +148,9 @@ def main():
     print("\n" + "="*60)
     print("Raspberry Pi Car - Ultrasonic Sensor Test")
     print("="*60)
+    cfg = hardware_config.ultrasonic
     print("WARNING: Ensure HC-SR04 is properly connected!")
-    print("  TRIG -> GPIO4, ECHO -> GPIO17 (with level shifter)")
+    print(f"  TRIG -> GPIO{cfg.trigger_pin}, ECHO -> GPIO{cfg.echo_pin} (with level shifter)")
     print("Press Ctrl+C to stop at any time")
     print("="*60)
     

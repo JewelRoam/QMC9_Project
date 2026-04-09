@@ -15,33 +15,23 @@ from typing import Optional, Tuple
 
 @dataclass
 class MotorPins:
-    """电机控制引脚配置"""
-    # 左前轮
-    left_front_pwm: int = 12   # PWM速度控制
-    left_front_dir1: int = 5   # 方向控制1
-    left_front_dir2: int = 6   # 方向控制2
+    """电机控制引脚配置 (gpiozero.Robot 2-motor architecture)"""
+    # Left motor group (front+rear paired)
+    left_forward: int = 22   # Left forward pin
+    left_backward: int = 27  # Left backward pin
+    left_enable: int = 18    # Left PWM enable pin
     
-    # 右前轮
-    right_front_pwm: int = 13
-    right_front_dir1: int = 20
-    right_front_dir2: int = 21
-    
-    # 左后轮
-    left_rear_pwm: int = 18
-    left_rear_dir1: int = 23
-    left_rear_dir2: int = 24
-    
-    # 右后轮
-    right_rear_pwm: int = 19
-    right_rear_dir1: int = 16
-    right_rear_dir2: int = 26
+    # Right motor group (front+rear paired)
+    right_forward: int = 25  # Right forward pin
+    right_backward: int = 24 # Right backward pin
+    right_enable: int = 23   # Right PWM enable pin
 
 
 @dataclass
 class UltrasonicConfig:
     """超声波传感器配置"""
-    trigger_pin: int = 4
-    echo_pin: int = 17
+    trigger_pin: int = 20
+    echo_pin: int = 21
     servo_channel: int = 0  # PCA9685通道
     min_angle: int = 0      # 最小角度
     max_angle: int = 180    # 最大角度

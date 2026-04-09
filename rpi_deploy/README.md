@@ -13,16 +13,14 @@
 - **摄像头**: USB摄像头（支持640x480@30fps）
 - **通信**: 以太网/WiFi
 
-### 引脚映射
+### 引脚映射（与makerobo_code案例一致）
 ```
-电机控制:
-  左前轮: PWM=GPIO12, DIR1=GPIO5, DIR2=GPIO6
-  右前轮: PWM=GPIO13, DIR1=GPIO20, DIR2=GPIO21
-  左后轮: PWM=GPIO18, DIR1=GPIO23, DIR2=GPIO24
-  右后轮: PWM=GPIO19, DIR1=GPIO16, DIR2=GPIO26
+电机控制 (gpiozero.Robot, 左右各一组并联):
+  左侧电机: forward=GPIO22, backward=GPIO27, enable=GPIO18
+  右侧电机: forward=GPIO25, backward=GPIO24, enable=GPIO23
 
-超声波传感器:
-  TRIG=GPIO4, ECHO=GPIO17
+超声波传感器 (gpiozero.DistanceSensor):
+  TRIG=GPIO20, ECHO=GPIO21
 
 按键 & LED:
   按键=GPIO19, 绿色LED=GPIO5, 红色LED=GPIO6
@@ -80,32 +78,29 @@ pip3 install gpiozero smbus2 flask numpy
 ### 2. 克隆项目
 
 ```bash
-cd ~
-git clone <your-repo-url> QMC9_Project
+git clone https://github.com/JewelRoam/QMC9_Project.git
 cd QMC9_Project
 ```
 
 ### 3. 硬件测试
 
-按顺序测试各硬件组件：
+按顺序测试各硬件组件（在项目根目录 `QMC9_Project/` 下运行）：
 
 ```bash
-cd rpi_deploy/tests
-
 # 1. 测试电机（确保小车有空间移动！）
-python3 test_motor.py --duration 1.0
+python3 -m rpi_deploy.tests.test_motor --duration 1.0
 
 # 2. 测试舵机
-python3 test_servo.py
+python3 -m rpi_deploy.tests.test_servo
 
 # 3. 测试超声波传感器
-python3 test_ultrasonic.py --scan
+python3 -m rpi_deploy.tests.test_ultrasonic --scan
 
 # 4. 测试摄像头
-python3 test_camera.py --preview --save
+python3 -m rpi_deploy.tests.test_camera --preview --save
 
 # 5. 测试远程控制（树莓派端启动服务器）
-python3 test_remote_control.py --server
+python3 -m rpi_deploy.tests.test_remote_control --server
 ```
 
 ### 4. PC端远程控制
@@ -113,7 +108,7 @@ python3 test_remote_control.py --server
 在PC上运行客户端测试：
 
 ```bash
-python rpi_deploy/tests/test_remote_control.py --client --host 192.168.137.33
+python3 -m rpi_deploy.tests.test_remote_control --client --host 192.168.137.33
 ```
 
 浏览器查看视频流：
@@ -199,17 +194,21 @@ python3 -m unittest rpi_deploy.tests.test_obstacle_avoidance -v
 
 ## API参考
 
-### MotorController (电机控制)
+### MotorController (电机控制, gpiozero.Robot)
 
 ```python
 from rpi_deploy.motor_driver import MotorController
 
 motor = MotorController()
-motor.move_forward(speed=50)    # 前进 50%速度
-motor.turn_left(speed=40, turn_rate=0.5)  # 左转
-motor.rotate_right(speed=30)    # 原地右转
-motor.stop()                     # 停止
-motor.emergency_stop()           # 紧急停止
+motor.move_forward(speed=0.3)    # 前进, speed 0.0-1.0
+motor.move_backward(speed=0.3)   # 后退
+motor.turn_left(speed=0.3)       # 差速左转
+motor.turn_right(speed=0.3)      # 差速右转
+motor.rotate_left(speed=0.3)     # 原地左转
+motor.rotate_right(speed=0.3)    # 原地右转
+motor.curve_move(0.3, 0.1)       # 曲线运动(linear, angular)
+motor.stop()                      # 停止
+motor.emergency_stop()            # 紧急停止
 ```
 
 ### ServoController (舵机控制)
@@ -224,15 +223,16 @@ servo.set_camera_tilt(30)        # 设置摄像头俯仰角度
 servo.center_all()               # 所有舵机归中
 ```
 
-### UltrasonicSensor (超声波传感器)
+### UltrasonicSensor (超声波传感器, gpiozero.DistanceSensor)
 
 ```python
 from rpi_deploy.ultrasonic_sensor import UltrasonicSensor
 
-sensor = UltrasonicSensor()
-distance = sensor.measure_once().distance_cm  # 单次测量
-filtered = sensor.measure_average().distance_cm  # 滤波测量
+sensor = UltrasonicSensor()  # TRIG=GPIO20, ECHO=GPIO21
+distance = sensor.measure_once().distance_cm  # 单次测量(cm)
+filtered = sensor.measure_average().distance_cm  # 中值滤波测量
 is_obstacle = sensor.is_obstacle_detected(threshold=30)  # 障碍物检测
+clear_angle = sensor.find_clear_direction(servo)  # 舵机扫描找畅通方向
 ```
 
 ### CameraDriver (摄像头)
