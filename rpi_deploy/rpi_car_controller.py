@@ -95,8 +95,9 @@ def main():
     if args.mode == "obstacle_avoidance":
         from rpi_deploy.obstacle_avoidance import main as obstacle_main
         # Strip our --mode arg so obstacle_avoidance's argparse works correctly
+        # Always pass a list (even empty) so argparse uses it instead of sys.argv
         remaining = [a for a in sys.argv[1:] if a not in ("--mode", "obstacle_avoidance")]
-        obstacle_main(remaining if remaining else None)
+        obstacle_main(remaining)
         return
 
     if yaml is None:
