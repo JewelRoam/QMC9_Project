@@ -33,7 +33,14 @@ except ImportError:
     Motor = None
     print("[WARNING] gpiozero not available, running in simulation mode")
 
-from .hardware_config import hardware_config
+# Handle direct execution vs package import
+if __name__ == "__main__" or __package__ is None:
+    import sys
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from rpi_deploy.hardware_config import hardware_config
+else:
+    from .hardware_config import hardware_config
 
 
 class Direction(Enum):
