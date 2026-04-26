@@ -206,11 +206,12 @@ class ServoController:
         
         # Set PWM frequency
         self._pca.set_pwm_freq(self.config.pwm_frequency)
+        time.sleep(0.1)  # Allow oscillator to stabilize before driving servos
         
         # Current angle state
         self._ultrasonic_angle = self.ultrasonic_config.center_angle
         self._camera_pan = 90
-        self._camera_tilt = 45
+        self._camera_tilt = 60
         
         # Initialize to center position
         self.center_all()
@@ -295,9 +296,8 @@ class ServoController:
         self.set_servo_angle(self.camera_config.pan_servo_channel, angle)
     
     def set_camera_tilt(self, angle: float):
-        """Set camera tilt angle"""
-        angle = max(self.camera_config.tilt_min,
-                   min(self.camera_config.tilt_max, angle))
+        """Set camera tilt angle. Clamped to physical servo range (0 to tilt_max)."""
+        angle = max(0, min(self.camera_config.tilt_max, angle))
         self.set_servo_angle(self.camera_config.tilt_servo_channel, angle)
     
     def set_camera_position(self, pan: float, tilt: float):
@@ -306,8 +306,8 @@ class ServoController:
         self.set_camera_tilt(tilt)
     
     def center_camera(self):
-        """Center camera"""
-        self.set_camera_position(90, 45)
+        """Center camera to a safe position (pan=90, tilt=60)."""
+        self.set_camera_position(90, 60)
     
     def track_object(self, delta_x: float, delta_y: float, 
                     speed: float = 2.0):
