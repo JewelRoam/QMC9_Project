@@ -183,24 +183,26 @@ def main():
                         last_log_time = time.time()
 
                 elif front_dist < WARNING_DIST:
-                    # WARNING: obstacle ahead. APF alone won't steer if YOLO misses.
-                    # Scan left/right with servo to find clearance, then steer that way.
-                    dis_left = _scan_left(ultrasonic, servo)
-                    dis_right = _scan_right(ultrasonic, servo)
-                    servo.center_ultrasonic()
-                    time.sleep(SERVO_SETTLE)
+                    # WARNING: obstacle ahead, steer away proactively
+                    # Use YOLO screen-side bias (same as CRUISE) for instant reaction
+                    out = planner.compute(0, 0, 0, 5.0, 3.0, 0, cached_apf_obs)
+                    steer = out.target_steering * 0.6
 
-                    # Choose avoidance direction
-                    if dis_left > dis_right + 10:  # Left has 10cm+ more room
-                        steer = -0.5  # steer left
-                    elif dis_right > dis_left + 10:  # Right has 10cm+ more room
-                        steer = 0.5   # steer right
-                    else:
-                        steer = 0.0   # no clear preference
+                    # If APF gives no steer but YOLO sees something,
+                    # steer away from closest detection's screen side
+                    if abs(steer) < 0.05 and cached_apf_obs:
+                        closest = min(cached_apf_obs, key=lambda o: o.distance)
+                        if closest.y > 0.05:
+                            steer = -0.4  # obstacle right → steer left
+                        elif closest.y < -0.05:
+                            steer = 0.4   # obstacle left → steer right
+                        else:
+                            # Obstacle dead center → scan servo ONCE for direction
+                            steer = _warning_scan_steer(ultrasonic, servo)
 
                     motor.curve_move(CRUISE_SPEED * 0.4, steer)
                     if time.time() - last_log_time > 1.5:
-                        print(f"[WARN] F={front_dist:.0f} L={dis_left:.0f} R={dis_right:.0f} steer={steer:.1f}")
+                        print(f"[WARN] F={front_dist:.0f} steer={steer:.2f}")
                         last_log_time = time.time()
 
                 else:
@@ -326,6 +328,20 @@ def _scan_right(sensor: UltrasonicSensor, servo: ServoController) -> float:
     time.sleep(SERVO_SETTLE)
     reading = sensor.measure_once()
     return reading.distance_cm if reading.valid else 999.0
+
+
+def _warning_scan_steer(sensor: UltrasonicSensor, servo: ServoController) -> float:
+    """One-shot servo scan for WARNING zone when obstacle is dead center.
+    Returns steer value: negative=left, positive=right, 0=undecided."""
+    dis_left = _scan_left(sensor, servo)
+    dis_right = _scan_right(sensor, servo)
+    servo.center_ultrasonic()
+    time.sleep(SERVO_SETTLE)
+    if dis_left > dis_right + 10:
+        return -0.4
+    elif dis_right > dis_left + 10:
+        return 0.4
+    return 0.0
 
 
 # ---- Overlay Drawing ----
