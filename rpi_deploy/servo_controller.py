@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-树莓派小车舵机控制模块
 Servo Controller Module for Raspberry Pi Robot Car
 
-基于PCA9685 I2C PWM控制器的舵机驱动
-兼容创乐博LOBOROBOT扩展板
+Based on PCA9685 I2C PWM controller for servo driving.
+Compatible with Chuang Le Bo LOBOROBOT expansion board.
 """
 
 import time
 import math
 from typing import Optional, Tuple
 
-# 尝试导入smbus，如果失败则使用模拟模式
+# Attempt to import smbus, if failed then use simulation mode
 try:
     import smbus
     SMBUS_AVAILABLE = True
@@ -25,11 +24,11 @@ from .hardware_config import hardware_config
 
 class PCA9685:
     """
-    PCA9685 I2C PWM控制器驱动类
-    16通道PWM输出，12位分辨率
+    PCA9685 I2C PWM controller driver class
+    16-channel PWM output, 12-bit resolution
     """
     
-    # PCA9685寄存器地址
+    # PCA9685 register addresses
     __MODE1 = 0x00
     __MODE2 = 0x01
     __SUBADR1 = 0x02
@@ -45,7 +44,7 @@ class PCA9685:
     __ALL_LED_OFF_L = 0xFC
     __ALL_LED_OFF_H = 0xFD
     
-    # 位定义
+    # Bit definitions
     __RESTART = 0x80
     __SLEEP = 0x10
     __ALLCALL = 0x01
@@ -69,53 +68,53 @@ class PCA9685:
             print(f"[SIM] PCA9685 simulated at address 0x{address:02X}")
     
     def _init_device(self):
-        """初始化PCA9685设备"""
+        """Initialize PCA9685 device"""
         if self._bus is None:
             return
         
-        # 复位设备
+        # Reset device
         self._write_byte(self.__MODE1, self.__ALLCALL)
-        time.sleep(0.005)  # 等待振荡器稳定
+        time.sleep(0.005)  # Wait for oscillator to stabilize
         
-        # 设置模式
+        # Set mode
         mode1 = self._read_byte(self.__MODE1)
-        mode1 = mode1 & ~self.__SLEEP  # 退出睡眠模式
+        mode1 = mode1 & ~self.__SLEEP  # Exit sleep mode
         self._write_byte(self.__MODE1, mode1)
         time.sleep(0.005)
         
-        # 设置输出模式
+        # Set output mode
         self._write_byte(self.__MODE2, self.__OUTDRV)
     
     def _write_byte(self, reg: int, value: int):
-        """写入单个字节"""
+        """Write a single byte"""
         if self._bus:
             self._bus.write_byte_data(self.address, reg, value)
     
     def _read_byte(self, reg: int) -> int:
-        """读取单个字节"""
+        """Read a single byte"""
         if self._bus:
             return self._bus.read_byte_data(self.address, reg)
         return 0
     
     def set_pwm_freq(self, freq_hz: float):
         """
-        设置PWM频率
+        Set PWM frequency
         
         Args:
-            freq_hz: 频率(Hz)，舵机通常使用50Hz (20ms周期)
+            freq_hz: Frequency (Hz), servos usually use 50Hz (20ms period)
         """
         if self._bus is None:
             print(f"[SIM] Set PWM frequency to {freq_hz}Hz")
             return
         
-        # 计算预分频值
-        prescaleval = 25000000.0  # 25MHz内部时钟
-        prescaleval /= 4096.0     # 12位分辨率
+        # Calculate prescale value
+        prescaleval = 25000000.0  # 25MHz internal clock
+        prescaleval /= 4096.0     # 12-bit resolution
         prescaleval /= float(freq_hz)
         prescaleval -= 1.0
         prescale = int(math.floor(prescaleval + 0.5))
         
-        # 进入睡眠模式以设置预分频
+        # Enter sleep mode to set prescale
         old_mode = self._read_byte(self.__MODE1)
         new_mode = (old_mode & 0x7F) | self.__SLEEP
         self._write_byte(self.__MODE1, new_mode)
@@ -128,12 +127,12 @@ class PCA9685:
     
     def set_pwm(self, channel: int, on: int, off: int):
         """
-        设置指定通道的PWM输出
+        Set PWM output for a specific channel
         
         Args:
-            channel: 通道号 (0-15)
-            on: 开启计数值 (0-4095)
-            off: 关闭计数值 (0-4095)
+            channel: Channel number (0-15)
+            on: Turn-on tick value (0-4095)
+            off: Turn-off tick value (0-4095)
         """
         if self._bus is None:
             return
@@ -145,11 +144,11 @@ class PCA9685:
     
     def set_duty_cycle(self, channel: int, pulse: float):
         """
-        设置占空比百分比
+        Set duty cycle percentage
         
         Args:
-            channel: 通道号
-            pulse: 占空比 (0-100)
+            channel: Channel number
+            pulse: Duty cycle (0-100)
         """
         pulse = max(0, min(100, pulse))
         off_value = int(pulse * 4096 / 100)
@@ -157,11 +156,11 @@ class PCA9685:
     
     def set_level(self, channel: int, value: int):
         """
-        设置数字电平输出
+        Set digital level output
         
         Args:
-            channel: 通道号
-            value: 0=低电平, 1=高电平
+            channel: Channel number
+            value: 0=low level, 1=high level
         """
         if value == 0:
             self.set_pwm(channel, 0, 0)
@@ -169,7 +168,7 @@ class PCA9685:
             self.set_pwm(channel, 0, 4095)
     
     def cleanup(self):
-        """清理资源，关闭所有输出"""
+        """Clean up resources, turn off all outputs"""
         if self._bus:
             for channel in range(16):
                 self.set_pwm(channel, 0, 0)
@@ -179,63 +178,63 @@ class PCA9685:
 
 class ServoController:
     """
-    舵机控制器
-    管理超声波云台和摄像头云台的舵机
+    Servo controller
+    Manages servos for ultrasonic gimbal and camera gimbal
     """
     
-    # 舵机脉冲宽度范围 (微秒)
-    SERVO_MIN_PULSE = 500   # 0.5ms = 0度
-    SERVO_MAX_PULSE = 2500  # 2.5ms = 180度
+    # Servo pulse width range (microseconds)
+    SERVO_MIN_PULSE = 500   # 0.5ms = 0 degrees
+    SERVO_MAX_PULSE = 2500  # 2.5ms = 180 degrees
     
     def __init__(self):
         self.config = hardware_config.i2c
         self.ultrasonic_config = hardware_config.ultrasonic
         self.camera_config = hardware_config.camera
         
-        # 初始化PCA9685
+        # Initialize PCA9685
         self._pca = PCA9685(
             address=self.config.pca9685_address,
             bus_number=self.config.bus_number
         )
         
-        # 设置PWM频率
+        # Set PWM frequency
         self._pca.set_pwm_freq(self.config.pwm_frequency)
         
-        # 当前角度状态
+        # Current angle state
         self._ultrasonic_angle = self.ultrasonic_config.center_angle
         self._camera_pan = 90
         self._camera_tilt = 45
         
-        # 初始化到中心位置
+        # Initialize to center position
         self.center_all()
     
     def _angle_to_pulse(self, angle: float) -> int:
         """
-        将角度转换为PCA9685脉冲计数值
+        Convert angle to PCA9685 pulse tick value
         
-        公式: 4096 * ((angle * 11) + 500) / 20000
-        其中11是每度的脉冲增量 (2000us/180度 ≈ 11.11)
-        500是0.5ms对应的偏移量
+        Formula: 4096 * ((angle * 11) + 500) / 20000
+        Where 11 is the pulse increment per degree (2000us/180 degrees ≈ 11.11)
+        500 is the offset corresponding to 0.5ms
         """
-        # 限制角度范围
+        # Limit angle range
         angle = max(0, min(180, angle))
         
-        # 创乐博LOBOROBOT公式
+        # Chuang Le Bo LOBOROBOT formula
         pulse = int(4096 * ((angle * 11) + 500) / 20000)
         return max(0, min(4095, pulse))
     
     def set_servo_angle(self, channel: int, angle: float):
         """
-        设置舵机角度
+        Set servo angle
         
         Args:
-            channel: PCA9685通道号
-            angle: 角度 (0-180度)
+            channel: PCA9685 channel number
+            angle: Angle (0-180 degrees)
         """
         pulse = self._angle_to_pulse(angle)
         self._pca.set_pwm(channel, 0, pulse)
         
-        # 更新状态
+        # Update state
         if channel == self.ultrasonic_config.servo_channel:
             self._ultrasonic_angle = angle
         elif channel == self.camera_config.pan_servo_channel:
@@ -243,29 +242,29 @@ class ServoController:
         elif channel == self.camera_config.tilt_servo_channel:
             self._camera_tilt = angle
     
-    # ========== 超声波云台控制 ==========
+    # ========== Ultrasonic Gimbal Control ==========
     
     def set_ultrasonic_angle(self, angle: float):
-        """设置超声波传感器角度"""
+        """Set ultrasonic sensor angle"""
         angle = max(self.ultrasonic_config.min_angle,
                    min(self.ultrasonic_config.max_angle, angle))
         self.set_servo_angle(self.ultrasonic_config.servo_channel, angle)
     
     def center_ultrasonic(self):
-        """超声波传感器归中"""
+        """Center ultrasonic sensor"""
         self.set_ultrasonic_angle(self.ultrasonic_config.center_angle)
     
     def scan_ultrasonic(self, angles: Tuple[int, ...] = None, 
                        delay: float = None) -> dict:
         """
-        扫描指定角度序列
+        Scan a specified sequence of angles
         
         Args:
-            angles: 扫描角度列表，默认使用配置中的序列
-            delay: 每次移动后的延迟
+            angles: List of scanning angles, defaults to sequence in config
+            delay: Delay after each movement
         
         Returns:
-            角度位置字典 {angle: timestamp}
+            Dictionary of angle positions {angle: timestamp}
         """
         if angles is None:
             angles = hardware_config.control.scan_angles
@@ -280,50 +279,50 @@ class ServoController:
         
         return positions
     
-    # ========== 摄像头云台控制 ==========
+    # ========== Camera Gimbal Control ==========
     
     def set_camera_pan(self, angle: float):
-        """设置摄像头水平角度"""
+        """Set camera pan angle"""
         angle = max(self.camera_config.pan_min,
                    min(self.camera_config.pan_max, angle))
         self.set_servo_angle(self.camera_config.pan_servo_channel, angle)
     
     def set_camera_tilt(self, angle: float):
-        """设置摄像头俯仰角度"""
+        """Set camera tilt angle"""
         angle = max(self.camera_config.tilt_min,
                    min(self.camera_config.tilt_max, angle))
         self.set_servo_angle(self.camera_config.tilt_servo_channel, angle)
     
     def set_camera_position(self, pan: float, tilt: float):
-        """同时设置摄像头水平和俯仰角度"""
+        """Set camera pan and tilt angles simultaneously"""
         self.set_camera_pan(pan)
         self.set_camera_tilt(tilt)
     
     def center_camera(self):
-        """摄像头归中"""
+        """Center camera"""
         self.set_camera_position(90, 45)
     
     def track_object(self, delta_x: float, delta_y: float, 
                     speed: float = 2.0):
         """
-        根据目标偏移量调整摄像头跟踪
+        Adjust camera tracking based on object offset
         
         Args:
-            delta_x: 水平方向偏移 (-1 to 1, 负值向左)
-            delta_y: 垂直方向偏移 (-1 to 1, 负值向上)
-            speed: 跟踪速度系数
+            delta_x: Horizontal offset (-1 to 1, negative is left)
+            delta_y: Vertical offset (-1 to 1, negative is up)
+            speed: Tracking speed multiplier
         """
         new_pan = self._camera_pan - delta_x * speed * 5
         new_tilt = self._camera_tilt + delta_y * speed * 5
         self.set_camera_position(new_pan, new_tilt)
     
     def center_all(self):
-        """所有舵机归中"""
+        """Center all servos"""
         self.center_ultrasonic()
         self.center_camera()
     
     def get_status(self) -> dict:
-        """获取舵机状态"""
+        """Get servo status"""
         return {
             'ultrasonic_angle': self._ultrasonic_angle,
             'camera_pan': self._camera_pan,
@@ -333,25 +332,25 @@ class ServoController:
         }
     
     def test_sequence(self):
-        """测试序列"""
+        """Test sequence"""
         print("\n=== Servo Test Sequence ===")
         
-        # 测试超声波云台
+        # Test ultrasonic gimbal
         print("\nTesting ultrasonic servo...")
         for angle in [90, 45, 0, 45, 90, 135, 180, 135, 90]:
             print(f"  Setting ultrasonic angle to {angle}°")
             self.set_ultrasonic_angle(angle)
             time.sleep(0.5)
         
-        # 测试摄像头云台
+        # Test camera gimbal
         print("\nTesting camera servos...")
         positions = [
-            (90, 45),   # 中心
-            (45, 30),   # 左下
-            (135, 30),  # 右下
-            (135, 60),  # 右上
-            (45, 60),   # 左上
-            (90, 45),   # 回到中心
+            (90, 45),   # Center
+            (45, 30),   # Bottom left
+            (135, 30),  # Bottom right
+            (135, 60),  # Top right
+            (45, 60),   # Top left
+            (90, 45),   # Back to center
         ]
         for pan, tilt in positions:
             print(f"  Setting camera to pan={pan}°, tilt={tilt}°")
@@ -361,20 +360,20 @@ class ServoController:
         print("\n=== Test Complete ===")
     
     def cleanup(self):
-        """清理资源"""
+        """Clean up resources"""
         self.center_all()
         time.sleep(0.5)
         self._pca.cleanup()
 
 
-# 便捷函数
+# Convenience functions
 def create_servo_controller() -> ServoController:
-    """创建舵机控制器实例"""
+    """Create a servo controller instance"""
     return ServoController()
 
 
 if __name__ == "__main__":
-    # 独立测试
+    # Standalone test
     print("Testing Servo Controller...")
     controller = create_servo_controller()
     

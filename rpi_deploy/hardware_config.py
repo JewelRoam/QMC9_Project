@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-树莓派小车硬件配置模块
 Hardware Configuration Module for Raspberry Pi Robot Car
 
-基于创乐博LOBOROBOT扩展板的硬件配置
 Based on Chuang Le Bo LOBOROBOT expansion board
 """
 
@@ -15,7 +13,7 @@ from typing import Optional, Tuple
 
 @dataclass
 class MotorPins:
-    """电机控制引脚配置 (gpiozero.Robot 2-motor architecture)"""
+    """Motor control pin configuration (gpiozero.Robot 2-motor architecture)"""
     # Left motor group (front+rear paired)
     left_forward: int = 22   # Left forward pin
     left_backward: int = 27  # Left backward pin
@@ -29,86 +27,86 @@ class MotorPins:
 
 @dataclass
 class UltrasonicConfig:
-    """超声波传感器配置"""
+    """Ultrasonic sensor configuration"""
     trigger_pin: int = 20
     echo_pin: int = 21
-    servo_channel: int = 0  # PCA9685通道
-    min_angle: int = 0      # 最小角度
-    max_angle: int = 180    # 最大角度
-    center_angle: int = 90  # 中心位置
+    servo_channel: int = 0  # PCA9685 channel
+    min_angle: int = 0      # Minimum angle
+    max_angle: int = 180    # Maximum angle
+    center_angle: int = 90  # Center position
 
 
 @dataclass
 class CameraConfig:
-    """摄像头配置"""
-    device_id: int = 0           # USB摄像头设备ID
-    width: int = 640             # 分辨率宽度
-    height: int = 480            # 分辨率高度
-    fps: int = 30                # 帧率
-    pan_servo_channel: int = 1   # 水平舵机通道
-    tilt_servo_channel: int = 2  # 俯仰舵机通道
-    pan_min: int = 0             # 水平最小角度
-    pan_max: int = 180           # 水平最大角度
-    tilt_min: int = -10          # 俯仰最小角度
-    tilt_max: int = 90           # 俯仰最大角度
+    """Camera configuration"""
+    device_id: int = 0           # USB camera device ID
+    width: int = 640             # Resolution width
+    height: int = 480            # Resolution height
+    fps: int = 30                # Framerate
+    pan_servo_channel: int = 1   # Pan servo channel
+    tilt_servo_channel: int = 2  # Tilt servo channel
+    pan_min: int = 0             # Minimum pan angle
+    pan_max: int = 180           # Maximum pan angle
+    tilt_min: int = -10          # Minimum tilt angle
+    tilt_max: int = 90           # Maximum tilt angle
 
 
 @dataclass
 class I2CConfig:
-    """I2C总线配置"""
-    bus_number: int = 1          # I2C总线号 (RPi 5使用bus 1)
-    pca9685_address: int = 0x40  # PCA9685默认地址
-    pwm_frequency: int = 50      # 舵机PWM频率 (50Hz = 20ms周期)
+    """I2C bus configuration"""
+    bus_number: int = 1          # I2C bus number (RPi 5 uses bus 1)
+    pca9685_address: int = 0x40  # Default PCA9685 address
+    pwm_frequency: int = 50      # Servo PWM frequency (50Hz = 20ms period)
 
 
 @dataclass
 class NetworkConfig:
-    """网络通信配置"""
-    # 远程控制服务器
+    """Network communication configuration"""
+    # Remote control server
     control_host: str = "0.0.0.0"
     control_port: int = 5000
     
-    # 视频流服务器
+    # Video stream server
     video_port: int = 8080
     
-    # V2V通信 (WiFi UDP广播)
+    # V2V communication (WiFi UDP broadcast)
     v2v_enabled: bool = True
-    v2v_broadcast_ip: str = "192.168.137.255"  # 根据实际网段调整
+    v2v_broadcast_ip: str = "192.168.137.255"  # Adjust according to actual subnet
     v2v_port: int = 9999
     vehicle_id: str = "RPI_CAR_001"
 
 
 @dataclass
 class ButtonLEDConfig:
-    """按键和LED配置"""
-    button_pin: int = 19        # 启动/停止按键
-    green_led_pin: int = 5      # 运行指示灯
-    red_led_pin: int = 6        # 避障指示灯
+    """Button and LED configuration"""
+    button_pin: int = 19        # Start/Stop button
+    green_led_pin: int = 5      # Running status LED
+    red_led_pin: int = 6        # Obstacle avoidance LED
 
 
 @dataclass
 class ControlConfig:
-    """运动控制配置"""
-    # 速度限制
-    max_speed: float = 100.0     # 最大速度百分比
-    min_speed: float = 20.0      # 最小有效速度
+    """Motion control configuration"""
+    # Speed limits
+    max_speed: float = 100.0     # Maximum speed percentage
+    min_speed: float = 20.0      # Minimum effective speed
     
-    # 转向参数
-    turn_factor: float = 0.5     # 转向系数
+    # Steering parameters
+    turn_factor: float = 0.5     # Turn factor
     
-    # 安全距离
-    safe_distance_cm: float = 30.0   # 安全停止距离
-    warning_distance_cm: float = 50.0  # 警告距离
+    # Safety distance
+    safe_distance_cm: float = 30.0   # Safe stopping distance
+    warning_distance_cm: float = 50.0  # Warning distance
     
-    # 扫描参数
-    scan_angles: Tuple[int, ...] = (0, 45, 90, 135, 180)  # 扫描角度序列
-    scan_delay: float = 0.3      # 每次扫描延迟
+    # Scanning parameters
+    scan_angles: Tuple[int, ...] = (0, 45, 90, 135, 180)  # Scan angle sequence
+    scan_delay: float = 0.3      # Delay for each scan step
 
 
 class HardwareConfig:
     """
-    硬件配置管理类
-    统一管理所有硬件配置参数
+    Hardware configuration management class
+    Centralized management of all hardware configuration parameters
     """
     
     def __init__(self):
@@ -120,12 +118,12 @@ class HardwareConfig:
         self.button_led = ButtonLEDConfig()
         self.control = ControlConfig()
         
-        # 从环境变量加载覆盖配置
+        # Load override configuration from environment variables
         self._load_from_env()
     
     def _load_from_env(self):
-        """从环境变量加载配置覆盖"""
-        # 网络配置
+        """Load configuration overrides from environment variables"""
+        # Network configuration
         if os.getenv('RPI_CONTROL_PORT'):
             self.network.control_port = int(os.getenv('RPI_CONTROL_PORT'))
         if os.getenv('RPI_VIDEO_PORT'):
@@ -135,18 +133,18 @@ class HardwareConfig:
         if os.getenv('RPI_V2V_BROADCAST'):
             self.network.v2v_broadcast_ip = os.getenv('RPI_V2V_BROADCAST')
         
-        # 摄像头配置
+        # Camera configuration
         if os.getenv('RPI_CAMERA_WIDTH'):
             self.camera.width = int(os.getenv('RPI_CAMERA_WIDTH'))
         if os.getenv('RPI_CAMERA_HEIGHT'):
             self.camera.height = int(os.getenv('RPI_CAMERA_HEIGHT'))
         
-        # 安全距离
+        # Safety distance
         if os.getenv('RPI_SAFE_DISTANCE'):
             self.control.safe_distance_cm = float(os.getenv('RPI_SAFE_DISTANCE'))
     
     def to_dict(self) -> dict:
-        """导出为字典格式"""
+        """Export as dictionary format"""
         return {
             'motor': self.motor.__dict__,
             'ultrasonic': self.ultrasonic.__dict__,
@@ -159,7 +157,7 @@ class HardwareConfig:
     
     @classmethod
     def from_dict(cls, config_dict: dict) -> 'HardwareConfig':
-        """从字典创建配置"""
+        """Create configuration from dictionary"""
         config = cls()
         if 'motor' in config_dict:
             config.motor = MotorPins(**config_dict['motor'])
@@ -178,5 +176,5 @@ class HardwareConfig:
         return config
 
 
-# 全局配置实例
+# Global configuration instance
 hardware_config = HardwareConfig()
