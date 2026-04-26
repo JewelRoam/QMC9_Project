@@ -47,7 +47,7 @@ class CameraConfig:
     tilt_servo_channel: int = 2  # Tilt servo channel
     pan_min: int = 0             # Minimum pan angle
     pan_max: int = 180           # Maximum pan angle
-    tilt_min: int = 0          # Minimum tilt angle
+    tilt_min: int = -10          # Minimum tilt angle
     tilt_max: int = 90           # Maximum tilt angle
 
 

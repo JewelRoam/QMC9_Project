@@ -251,7 +251,7 @@ def run_interactive(host: str, port: int):
     # Ultrasonic servo tracking angle
     us_angle = 90.0
     cam_pan = 90.0
-    cam_tilt = 0.0
+    cam_tilt = -10.0
     SERVO_STEP = 15.0
 
     try:
@@ -301,10 +301,10 @@ def run_interactive(host: str, port: int):
                 cam_tilt = min(90, cam_tilt + SERVO_STEP)
                 ctrl.send_servo('camera_tilt', cam_tilt)
             elif key in ('l', 'L'):
-                cam_tilt = max(0, cam_tilt - SERVO_STEP)
+                cam_tilt = max(-10, cam_tilt - SERVO_STEP)
                 ctrl.send_servo('camera_tilt', cam_tilt)
             elif key in ('c', 'C'):
-                us_angle, cam_pan, cam_tilt = 90, 90, 0
+                us_angle, cam_pan, cam_tilt = 90, 90, -10
                 ctrl.send_servo('ultrasonic', us_angle)
                 ctrl.send_servo('camera_pan', cam_pan)
                 ctrl.send_servo('camera_tilt', cam_tilt)
