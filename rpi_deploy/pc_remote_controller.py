@@ -251,7 +251,7 @@ def run_interactive(host: str, port: int):
     # Ultrasonic servo tracking angle
     us_angle = 90.0
     cam_pan = 90.0
-    cam_tilt = 60.0
+    cam_tilt = 90.0
     SERVO_STEP = 15.0
 
     try:
