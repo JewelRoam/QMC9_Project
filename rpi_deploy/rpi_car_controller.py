@@ -87,7 +87,7 @@ def main():
     print("[INIT] Loading YOLO11n ONNX...")
     detector = YOLODetector({
         "use_onnx": True,
-        "imgsz": 320,
+        "imgsz": 640,
         "confidence_threshold": YOLO_CONFIDENCE_THRESHOLD,
     })
     planner = APFPlanner({
@@ -118,6 +118,11 @@ def main():
     cached_detections = []
     cached_apf_obs = []
     yolo_frame_count = 0
+
+    # Ultrasonic scan cache for WARNING zone when YOLO is blind
+    last_scan_time = 0
+    cached_scan_steer = 0.0
+    SCAN_CACHE_TTL = 0.8  # Re-scan every ~0.8s in WARNING zone
 
     try:
         while True:
@@ -152,6 +157,11 @@ def main():
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 cached_detections = detector.detect(rgb)
                 obstacles = detector.get_obstacles(cached_detections)
+
+                # Debug: print what YOLO actually sees (every 3 seconds)
+                if cached_detections and time.time() - last_log_time > 3.0:
+                    det_summary = [f"{d.class_name}({d.category})" for d in cached_detections[:5]]
+                    print(f"[DEBUG] YOLO sees: {det_summary} -> obstacles:{len(obstacles)}")
 
                 # Rebuild APF obstacle list (cached until next YOLO frame)
                 cached_apf_obs = []
@@ -188,26 +198,30 @@ def main():
                         last_log_time = time.time()
 
                 elif front_dist < WARNING_DIST:
-                    # WARNING: obstacle ahead, steer away proactively
-                    # Use YOLO screen-side bias (same as CRUISE) for instant reaction
+                    # WARNING: obstacle ahead, steer away
                     out = planner.compute(0, 0, 0, 5.0, 3.0, 0, cached_apf_obs)
                     steer = out.target_steering * 0.6
 
-                    # If APF gives no steer but YOLO sees something,
-                    # steer away from closest detection's screen side
                     if abs(steer) < 0.05 and cached_apf_obs:
+                        # YOLO sees something → screen-side bias
                         closest = min(cached_apf_obs, key=lambda o: o.distance)
                         if closest.y > 0.05:
-                            steer = -0.4  # obstacle right → steer left
+                            steer = -0.4
                         elif closest.y < -0.05:
-                            steer = 0.4   # obstacle left → steer right
+                            steer = 0.4
                         else:
-                            # Obstacle dead center → scan servo ONCE for direction
                             steer = _warning_scan_steer(ultrasonic, servo)
+                    elif abs(steer) < 0.05 and not cached_apf_obs:
+                        # YOLO is blind → use cached ultrasonic scan
+                        now = time.time()
+                        if now - last_scan_time > SCAN_CACHE_TTL:
+                            cached_scan_steer = _warning_scan_steer(ultrasonic, servo)
+                            last_scan_time = now
+                        steer = cached_scan_steer
 
                     motor.curve_move(CRUISE_SPEED * 0.4, steer)
                     if time.time() - last_log_time > 1.5:
-                        print(f"[WARN] F={front_dist:.0f} steer={steer:.2f}")
+                        print(f"[WARN] F={front_dist:.0f} Det:{len(cached_apf_obs)} steer={steer:.2f}")
                         last_log_time = time.time()
 
                 else:
@@ -215,8 +229,6 @@ def main():
                     out = planner.compute(0, 0, 0, 8.0, 3.0, 0, cached_apf_obs)
                     steer = out.target_steering * 0.4
 
-                    # If APF gives no steering but YOLO sees obstacles,
-                    # steer away from the most prominent detection's screen side
                     if abs(steer) < 0.05 and cached_apf_obs:
                         closest = min(cached_apf_obs, key=lambda o: o.distance)
                         if closest.y > 0.05:
