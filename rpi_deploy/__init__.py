@@ -1,9 +1,2 @@
-# Raspberry Pi deployment package
-
-from .obstacle_avoidance import (
-    ObstacleAvoidanceController,
-    SimpleAPFController,
-    mode_simple,
-    mode_servo,
-    mode_apf,
-)
+# Raspberry Pi Deployment Package
+# Empty __init__ to prevent relative import conflicts during direct script execution.
