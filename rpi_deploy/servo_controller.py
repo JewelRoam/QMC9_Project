@@ -211,7 +211,7 @@ class ServoController:
         # Current angle state
         self._ultrasonic_angle = self.ultrasonic_config.center_angle
         self._camera_pan = 90
-        self._camera_tilt = 90
+        self._camera_tilt = 0
         
         # Initialize to center position
         self.center_all()
@@ -306,8 +306,8 @@ class ServoController:
         self.set_camera_tilt(tilt)
     
     def center_camera(self):
-        """Center camera to a safe position (pan=90, tilt=90)."""
-        self.set_camera_position(90, 90)
+        """Center camera to a safe position (pan=90, tilt=0)."""
+        self.set_camera_position(90, 0)
     
     def track_object(self, delta_x: float, delta_y: float, 
                     speed: float = 2.0):
