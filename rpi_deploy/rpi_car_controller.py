@@ -183,17 +183,33 @@ def main():
                         last_log_time = time.time()
 
                 elif front_dist < WARNING_DIST:
-                    # Warning zone -> APF gentle steering (cached obstacles)
-                    out = planner.compute(0, 0, 0, 5.0, 3.0, 0, cached_apf_obs)
-                    steer = out.target_steering * 0.3
-                    motor.curve_move(CRUISE_SPEED * 0.7, steer)
+                    # Warning zone -> inject ultrasonic obstacle into APF
+                    # so steering works even when YOLO misses the obstacle
+                    warn_obs = list(cached_apf_obs)
+                    warn_obs.append(Obstacle(
+                        x=front_dist / 100.0,  # cm → m
+                        y=0.0,                 # centered
+                        distance=front_dist / 100.0,
+                        category="ultrasonic"
+                    ))
+                    out = planner.compute(0, 0, 0, 5.0, 3.0, 0, warn_obs)
+                    steer = out.target_steering * 0.5
+                    speed = CRUISE_SPEED * 0.6
+                    motor.curve_move(speed, steer)
                     if time.time() - last_log_time > 2.0:
-                        print(f"[WARN] Front: {front_dist:.1f}cm, APF steering")
+                        print(f"[WARN] Front: {front_dist:.1f}cm, APF steer={steer:.2f}")
                         last_log_time = time.time()
 
                 else:
-                    # Clear -> forward with APF fine-tuning
-                    out = planner.compute(0, 0, 0, 8.0, 3.0, 0, cached_apf_obs)
+                    # Clear -> forward, inject ultrasonic obstacle for safety
+                    cruise_obs = list(cached_apf_obs)
+                    cruise_obs.append(Obstacle(
+                        x=front_dist / 100.0,
+                        y=0.0,
+                        distance=front_dist / 100.0,
+                        category="ultrasonic"
+                    ))
+                    out = planner.compute(0, 0, 0, 8.0, 3.0, 0, cruise_obs)
                     if not out.emergency_brake and out.target_speed > 0.1:
                         motor.curve_move(CRUISE_SPEED, out.target_steering * 0.3)
                     else:
