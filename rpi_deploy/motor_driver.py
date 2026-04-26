@@ -1,6 +1,6 @@
 """
-NexusPilot: Motor Driver Module
-Controls the 4WD chassis using differential drive logic through gpiozero.
+NexusPilot: Robust Motor Driver for RPi 5
+Explicitly manages L298N Enable pins (GPIO 18/23) for LOBOROBOT board.
 """
 import time
 import sys
@@ -9,125 +9,99 @@ from enum import Enum
 from typing import Optional
 
 try:
-    from gpiozero import Robot, Motor
+    from gpiozero import PWMOutputDevice, DigitalOutputDevice
     GPIO_AVAILABLE = True
 except ImportError:
     GPIO_AVAILABLE = False
-    Robot = None
-    Motor = None
 
-# Add root directory to sys.path for direct script execution
+# Force RPi 5 GPIO chip index
+os.environ["LG_CHIP"] = "0"
+
+# Path setup
 if __name__ == "__main__" or __package__ is None:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from rpi_deploy.hardware_config import hardware_config
 else:
     from .hardware_config import hardware_config
 
-
-class Direction(Enum):
-    """Enumeration of movement directions."""
-    STOP = 0
-    FORWARD = 1
-    BACKWARD = 2
-    LEFT = 3
-    RIGHT = 4
-    ROTATE_LEFT = 5
-    ROTATE_RIGHT = 6
-
-
 class MotorController:
     """
-    Dual-motor differential drive controller.
-    Compatible with LOBOROBOT expansion boards.
+    Direct L298N Driver for 4WD Chassis.
+    Explicitly drives Forward, Backward, and PWM Enable pins.
     """
     def __init__(self):
         self.config = hardware_config.motor
-        self._robot: Optional[Robot] = None
-        self._current_direction = Direction.STOP
-        self._current_speed = 0.0
-
+        self._initialized = False
+        
         if GPIO_AVAILABLE:
-            self._init_gpio()
+            try:
+                # Left Motor Pins (GPIO 22, 27, 18)
+                self.left_fwd = DigitalOutputDevice(self.config.left_forward)
+                self.left_bwd = DigitalOutputDevice(self.config.left_backward)
+                self.left_en  = PWMOutputDevice(self.config.left_enable)
+                
+                # Right Motor Pins (GPIO 25, 24, 23)
+                self.right_fwd = DigitalOutputDevice(self.config.right_forward)
+                self.right_bwd = DigitalOutputDevice(self.config.right_backward)
+                self.right_en  = PWMOutputDevice(self.config.right_enable)
+                
+                self._initialized = True
+                print(f"[Motor] L298N initialized. Pins: L({self.config.left_forward},{self.config.left_backward},{self.config.left_enable}) R({self.config.right_forward},{self.config.right_backward},{self.config.right_enable})")
+            except Exception as e:
+                print(f"[Motor] Initialization Failed: {e}")
 
-    def _init_gpio(self):
-        """Initializes gpiozero.Robot with pin mapping from config."""
-        try:
-            self._robot = Robot(
-                left=Motor(
-                    forward=self.config.left_forward,
-                    backward=self.config.left_backward,
-                    enable=self.config.left_enable,
-                ),
-                right=Motor(
-                    forward=self.config.right_forward,
-                    backward=self.config.right_backward,
-                    enable=self.config.right_enable,
-                ),
-            )
-        except Exception as e:
-            print(f"[Motor] Init Error: {e}")
-            self._robot = None
+    def _drive(self, left_speed: float, right_speed: float):
+        """Internal raw PWM driving logic."""
+        if not self._initialized: return
 
-    def move_forward(self, speed: float = 0.3):
-        speed = max(0.0, min(1.0, speed))
-        self._current_direction = Direction.FORWARD
-        self._current_speed = speed
-        if self._robot: self._robot.forward(speed)
+        # Left Motor Control
+        self.left_fwd.value = 1 if left_speed > 0 else 0
+        self.left_bwd.value = 1 if left_speed < 0 else 0
+        self.left_en.value = abs(left_speed)
 
-    def move_backward(self, speed: float = 0.3):
-        speed = max(0.0, min(1.0, speed))
-        self._current_direction = Direction.BACKWARD
-        self._current_speed = speed
-        if self._robot: self._robot.backward(speed)
+        # Right Motor Control
+        self.right_fwd.value = 1 if right_speed > 0 else 0
+        self.right_bwd.value = 1 if right_speed < 0 else 0
+        self.right_en.value = abs(right_speed)
 
     def curve_move(self, linear_speed: float, angular_rate: float):
         """
-        Executes combined linear and angular motion.
-        Used for smooth APF trajectory following.
+        Combined motion for APF steering.
+        linear_speed: 0 to 1.0
+        angular_rate: -1.0 (left) to 1.0 (right)
         """
-        turn_factor = 0.5 # Default scaling for differential turn
-        left_speed = max(-1.0, min(1.0, linear_speed + angular_rate * turn_factor))
-        right_speed = max(-1.0, min(1.0, linear_speed - angular_rate * turn_factor))
-
-        if self._robot:
-            self._robot.left_motor.forward(max(0, left_speed))
-            self._robot.left_motor.backward(max(0, -left_speed))
-            self._robot.right_motor.forward(max(0, right_speed))
-            self._robot.right_motor.backward(max(0, -right_speed))
+        turn_gain = 0.6
+        left_speed = linear_speed + (angular_rate * turn_gain)
+        right_speed = linear_speed - (angular_rate * turn_gain)
+        
+        # Normalize to keep speed in range
+        max_v = max(abs(left_speed), abs(right_speed), 1.0)
+        self._drive(left_speed / max_v * abs(linear_speed), 
+                   right_speed / max_v * abs(linear_speed))
 
     def stop(self):
-        self._current_direction = Direction.STOP
-        self._current_speed = 0.0
-        if self._robot: self._robot.stop()
+        self._drive(0, 0)
 
     def emergency_stop(self):
-        self.stop()
+        self._drive(0, 0)
 
-    def test_sequence(self):
-        """Basic hardware verification sequence."""
-        print("[Motor] Starting test sequence...")
-        moves = [("FWD", self.move_forward), ("BWD", self.move_backward)]
-        for name, func in moves:
-            print(f"  Action: {name}")
-            func(0.3)
-            time.sleep(1.0)
-            self.stop()
-            time.sleep(0.5)
+    def move_backward(self, speed: float):
+        self._drive(-speed, -speed)
 
     def cleanup(self):
         self.stop()
-        if self._robot:
-            self._robot.close()
-            self._robot = None
-
-def create_motor_controller() -> MotorController:
-    return MotorController()
+        if self._initialized:
+            self.left_fwd.close()
+            self.left_bwd.close()
+            self.left_en.close()
+            self.right_fwd.close()
+            self.right_bwd.close()
+            self.right_en.close()
 
 if __name__ == "__main__":
-    controller = create_motor_controller()
-    try:
-        controller.test_sequence()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        controller.cleanup()
+    ctrl = MotorController()
+    print("Testing hardware drive...")
+    ctrl._drive(0.4, 0.4)
+    time.sleep(1.0)
+    ctrl.stop()
+    ctrl.cleanup()
