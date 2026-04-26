@@ -89,13 +89,71 @@ class UltrasonicSensor:
             if r.valid:
                 readings.append(r.distance_cm)
             time.sleep(0.01)
-        
+
         if not readings:
             return DistanceReading(999.0, False)
         return DistanceReading(float(np.median(readings)), True)
 
+    def get_filtered_distance(self, count: int = 5) -> float:
+        """Return a noise-filtered distance value (cm). Convenience wrapper."""
+        reading = self.measure_average(count=count)
+        return reading.distance_cm if reading.valid else 999.0
+
+    def is_obstacle_detected(self, threshold: float = 30.0) -> bool:
+        """Check if an obstacle is within the threshold distance (cm)."""
+        return self.get_filtered_distance(count=3) < threshold
+
+    def scan_with_servo(self, servo) -> List[dict]:
+        """
+        Scan at multiple servo angles and return distance readings.
+
+        Args:
+            servo: ServoController instance
+
+        Returns:
+            List of dicts with keys: angle, distance_cm, valid
+        """
+        angles = hardware_config.control.scan_angles
+        delay = hardware_config.control.scan_delay
+        results = []
+        for angle in angles:
+            servo.set_ultrasonic_angle(angle)
+            time.sleep(delay)
+            reading = self.measure_once()
+            results.append({
+                'angle': angle,
+                'distance_cm': reading.distance_cm,
+                'valid': reading.valid,
+            })
+        servo.center_ultrasonic()
+        time.sleep(delay)
+        return results
+
+    def find_clear_direction(self, servo) -> float:
+        """
+        Scan with servo and return the angle with the most clearance.
+
+        Args:
+            servo: ServoController instance
+
+        Returns:
+            Angle (degrees) with the largest valid distance reading.
+        """
+        readings = self.scan_with_servo(servo)
+        valid = [r for r in readings if r['valid']]
+        if not valid:
+            return hardware_config.ultrasonic.center_angle
+        best = max(valid, key=lambda r: r['distance_cm'])
+        return float(best['angle'])
+
     def cleanup(self):
         print("[Ultrasonic] Cleanup complete")
+
+
+def create_ultrasonic_sensor() -> UltrasonicSensor:
+    """Factory function to create an ultrasonic sensor instance."""
+    return UltrasonicSensor()
+
 
 if __name__ == "__main__":
     print("Testing Ultrasonic Sensor (Direct Execution)...")

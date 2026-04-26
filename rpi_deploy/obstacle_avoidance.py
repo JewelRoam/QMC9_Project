@@ -123,7 +123,7 @@ class ObstacleAvoidanceController:
 
     def distance_front_cm(self) -> float:
         """Measure distance straight ahead (cm)."""
-        reading = self.sensor.measure_average(samples=3)
+        reading = self.sensor.measure_average(count=3)
         return reading.distance_cm if reading.valid else 999.0
 
     def scan_front_cm(self) -> float:

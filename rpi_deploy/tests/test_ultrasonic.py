@@ -59,7 +59,7 @@ def test_filtered_measurement(sensor: UltrasonicSensor, samples: int = 10):
     print("Each reading is the median of 3 samples.")
     
     for i in range(samples):
-        reading = sensor.measure_average(samples=3)
+        reading = sensor.measure_average(count=3)
         status = "✓" if reading.valid else "✗"
         print(f"  [{status}] Filtered {i+1}: {reading.distance_cm:.1f} cm")
         time.sleep(0.3)
@@ -107,9 +107,9 @@ def test_scan_with_servo(sensor: UltrasonicSensor, servo: ServoController):
     readings = sensor.scan_with_servo(servo)
     
     print("\n--- Scan Results ---")
-    valid_readings = [r for r in readings if r.valid]
+    valid_readings = [r for r in readings if r['valid']]
     if valid_readings:
-        avg_distance = sum(r.distance_cm for r in valid_readings) / len(valid_readings)
+        avg_distance = sum(r['distance_cm'] for r in valid_readings) / len(valid_readings)
         print(f"Average distance: {avg_distance:.1f} cm")
         print(f"Valid readings: {len(valid_readings)}/{len(readings)}")
     else:

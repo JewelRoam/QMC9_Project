@@ -80,20 +80,72 @@ class MotorController:
         self._current_speed = speed
         if self._robot: self._robot.backward(speed)
 
+    def turn_left(self, speed: float = 0.3):
+        """Turn left (forward-left differential steering)."""
+        speed = max(0.0, min(1.0, speed))
+        self._current_direction = Direction.LEFT
+        self._current_speed = speed
+        if self._robot:
+            self._robot.left_motor.forward(speed * 0.3)
+            self._robot.right_motor.forward(speed)
+
+    def turn_right(self, speed: float = 0.3):
+        """Turn right (forward-right differential steering)."""
+        speed = max(0.0, min(1.0, speed))
+        self._current_direction = Direction.RIGHT
+        self._current_speed = speed
+        if self._robot:
+            self._robot.left_motor.forward(speed)
+            self._robot.right_motor.forward(speed * 0.3)
+
+    def rotate_left(self, speed: float = 0.3):
+        """Spin counter-clockwise in place (left motor backward, right motor forward)."""
+        speed = max(0.0, min(1.0, speed))
+        self._current_direction = Direction.ROTATE_LEFT
+        self._current_speed = speed
+        if self._robot:
+            self._robot.left_motor.backward(speed)
+            self._robot.right_motor.forward(speed)
+
+    def rotate_right(self, speed: float = 0.3):
+        """Spin clockwise in place (left motor forward, right motor backward)."""
+        speed = max(0.0, min(1.0, speed))
+        self._current_direction = Direction.ROTATE_RIGHT
+        self._current_speed = speed
+        if self._robot:
+            self._robot.left_motor.forward(speed)
+            self._robot.right_motor.backward(speed)
+
+    def get_status(self) -> dict:
+        """Return current motor controller status."""
+        return {
+            'direction': self._current_direction.name,
+            'speed': self._current_speed,
+            'gpio_available': GPIO_AVAILABLE and self._robot is not None,
+        }
+
     def curve_move(self, linear_speed: float, angular_rate: float):
         """
         Executes combined linear and angular motion.
         Used for smooth APF trajectory following.
         """
-        turn_factor = 0.5 # Default scaling for differential turn
+        turn_factor = 0.5
         left_speed = max(-1.0, min(1.0, linear_speed + angular_rate * turn_factor))
         right_speed = max(-1.0, min(1.0, linear_speed - angular_rate * turn_factor))
 
         if self._robot:
-            self._robot.left_motor.forward(max(0, left_speed))
-            self._robot.left_motor.backward(max(0, -left_speed))
-            self._robot.right_motor.forward(max(0, right_speed))
-            self._robot.right_motor.backward(max(0, -right_speed))
+            self._apply_motor_speed(self._robot.left_motor, left_speed)
+            self._apply_motor_speed(self._robot.right_motor, right_speed)
+
+    @staticmethod
+    def _apply_motor_speed(motor: "Motor", speed: float):
+        """Set a single motor speed without pin conflict. Only calls forward() or backward(), never both."""
+        if speed > 0:
+            motor.forward(speed)
+        elif speed < 0:
+            motor.backward(-speed)
+        else:
+            motor.stop()
 
     def stop(self):
         self._current_direction = Direction.STOP

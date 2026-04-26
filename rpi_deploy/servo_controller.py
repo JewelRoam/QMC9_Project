@@ -9,6 +9,8 @@ Compatible with Chuang Le Bo LOBOROBOT expansion board.
 
 import time
 import math
+import sys
+import os
 from typing import Optional, Tuple
 
 # Attempt to import smbus, if failed then use simulation mode
@@ -19,7 +21,12 @@ except ImportError:
     SMBUS_AVAILABLE = False
     print("[WARNING] smbus not available, running in simulation mode")
 
-from .hardware_config import hardware_config
+# Add root directory to sys.path for direct script execution
+if __name__ == "__main__" or __package__ is None:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from rpi_deploy.hardware_config import hardware_config
+else:
+    from .hardware_config import hardware_config
 
 
 class PCA9685:

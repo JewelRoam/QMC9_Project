@@ -113,7 +113,6 @@ class PCRemoteController:
         self._running = False
         if self._status_thread:
             self._status_thread.join(timeout=2)
-        self.client.stop()
         self.client.disconnect()
         self.connected = False
         print("[Disconnected]")

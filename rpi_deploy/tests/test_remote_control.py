@@ -146,15 +146,18 @@ def handle_move(params):
         return {"error": "Motor controller not available"}
     
     print(f"[CMD] Move: {direction} at {speed}%")
-    
+
+    # Convert percentage (0-100) to motor scale (0.0-1.0)
+    speed_norm = max(0.0, min(1.0, speed / 100.0))
+
     if direction == 'forward':
-        motor_controller.move_forward(speed)
+        motor_controller.move_forward(speed_norm)
     elif direction == 'backward':
-        motor_controller.move_backward(speed)
+        motor_controller.move_backward(speed_norm)
     elif direction == 'left':
-        motor_controller.turn_left(speed)
+        motor_controller.turn_left(speed_norm)
     elif direction == 'right':
-        motor_controller.turn_right(speed)
+        motor_controller.turn_right(speed_norm)
     else:
         motor_controller.stop()
     
@@ -205,9 +208,9 @@ def handle_scan(params):
     results = []
     for r in readings:
         results.append({
-            'angle': r.angle,
-            'distance': r.distance_cm,
-            'valid': r.valid
+            'angle': r['angle'],
+            'distance': r['distance_cm'],
+            'valid': r['valid']
         })
     
     return {"scan_results": results}
