@@ -31,12 +31,6 @@ def main():
     print("[INIT] Starting Hardware Self-Test...")
     motor = MotorController()
     ultrasonic = UltrasonicSensor()
-    
-    # --- PHYSICAL SELF-TEST ---
-    # Quick pulse to verify motor health
-    motor.curve_move(0.4, 0.0)
-    time.sleep(0.2)
-    motor.stop()
     print("[INIT] Hardware Check: OK.")
 
     # 2. Camera Init
@@ -69,6 +63,7 @@ def main():
     print("="*40)
     
     BASE_PWM = 0.32
+    SPEED_MULTIPLIER = 0.5  # Reduce forward speed for safer operation
     dist_buffer = {}
     last_log_time = 0
     target_fps = 15
@@ -115,9 +110,9 @@ def main():
             elif out.status == "recovering":
                 motor.move_backward(0.4)
             else:
-                # Map target_speed to PWM scale
+                # Map target_speed to PWM scale with speed reduction
                 speed_scale = out.target_speed / 10.0
-                clamped_pwm = speed_scale * (1.0 - BASE_PWM) + BASE_PWM
+                clamped_pwm = BASE_PWM + speed_scale * SPEED_MULTIPLIER * (1.0 - BASE_PWM)
                 
                 if out.target_speed < 0.1:
                     motor.stop()
