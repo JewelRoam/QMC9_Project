@@ -27,8 +27,8 @@ from rpi_deploy.servo_controller import ServoController
 
 # Ultrasonic thresholds (cm)
 EMERGENCY_DIST = 10.0      # Hard stop
-OBSTACLE_DIST = 20.0       # Trigger scan + avoidance
-WARNING_DIST = 60.0        # Slow down, APF steering
+OBSTACLE_DIST = 40.0       # Trigger servo scan + avoidance (primary obstacle detection)
+WARNING_DIST = 80.0        # Slow down + APF steering
 
 # Speed settings (0.0-1.0 gpiozero scale)
 CRUISE_SPEED = 0.2
@@ -183,17 +183,16 @@ def main():
                         last_log_time = time.time()
 
                 elif front_dist < WARNING_DIST:
-                    # Warning zone -> slow down, let YOLO+APF handle steering
-                    # Don't inject ultrasonic as obstacle (it may be a wall, not a blocker)
+                    # Warning zone -> slow down + APF gentle steering
                     out = planner.compute(0, 0, 0, 5.0, 3.0, 0, cached_apf_obs)
                     steer = out.target_steering * 0.4
                     motor.curve_move(CRUISE_SPEED * 0.6, steer)
                     if time.time() - last_log_time > 2.0:
-                        print(f"[WARN] Front: {front_dist:.1f}cm, det={len(cached_apf_obs)}, steer={steer:.2f}")
+                        print(f"[WARN] Front: {front_dist:.1f}cm, steer={steer:.2f}")
                         last_log_time = time.time()
 
                 else:
-                    # Clear -> forward with APF fine-tuning (YOLO only)
+                    # Clear -> forward with APF fine-tuning
                     out = planner.compute(0, 0, 0, 8.0, 3.0, 0, cached_apf_obs)
                     if not out.emergency_brake and out.target_speed > 0.1:
                         motor.curve_move(CRUISE_SPEED, out.target_steering * 0.3)
