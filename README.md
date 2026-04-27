@@ -6,10 +6,10 @@
 
 *Interconnected Hub (Nexus) · Autonomous Navigation (Pilot)*
 
-[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.8+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![CARLA](https://img.shields.io/badge/CARLA-0.9.13-FF6F00?logo=carla&logoColor=white)](https://carla.org)
 [![YOLO](https://img.shields.io/badge/YOLO-v11n-00FFFF?logo=yolo&logoColor=black)](https://ultralytics.com)
-[![Platform](https://img.shields.io/badge/Platform-CARLA%20%7C%20RPi5-blueviolet)]()
+[![Platform](https://img.shields.io/badge/Platform-CARLA%20%7C%20RPi5-blueviolet)](#-how-to-run)
 
 </div>
 
@@ -55,9 +55,39 @@ graph TD
 - `simulation/`: CARLA wrappers and multi-vehicle benchmarking scenarios.
 - `testing/`: Automated metrics collection and parameter tuning framework.
 
-## 🚀 Deployment (Raspberry Pi 5)
+## 🛠️ Quick Start (Installation)
 
-Ensure you are in the `.pi_env` and run:
+1. Clone the repository and navigate to the project root.
+2. Create a virtual environment (**Python 3.8 is highly recommended** for native CARLA 0.9.13 compatibility):
+   ```bash
+   python -m venv .carla_env
+   
+   # Windows
+   .carla_env\Scripts\activate
+   
+   # Linux/macOS
+   source .carla_env/bin/activate
+   ```
+3. Install the dependencies (hardware-specific libraries are commented out by default for PC compatibility):
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+## 🚀 How to Run
+
+### 1. CARLA Simulation (PC)
+Ensure the CARLA 0.9.13 server is running (`CarlaUE4.exe` or `./CarlaUE4.sh`), then execute:
+
+```bash
+# Single vehicle baseline test
+python simulation/single_vehicle_demo.py
+
+# Multi-vehicle V2V cooperative test (Core Innovation)
+python simulation/multi_vehicle_demo.py
+```
+
+### 2. Hardware Deployment (Raspberry Pi 5)
+Ensure you are in the `.pi_env` on the Raspberry Pi and run:
 
 ```bash
 # Core Autonomous Mode
