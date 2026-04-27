@@ -113,7 +113,7 @@ class APFPlanner:
             obstacles.append(obs)
         return obstacles
 
-    def _calculate_forces(self, ego_pos: np.ndarray, goal_pos: np.ndarray, 
+    def _calculate_forces(self, ego_pos: np.ndarray, goal_pos: np.ndarray,
                            obstacles: List[Obstacle]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         # 1. Attractive Force
         vec_to_goal = goal_pos - ego_pos
@@ -124,23 +124,37 @@ class APFPlanner:
         # 2. Repulsive & Rotational Forces
         f_rep_total = np.zeros(2)
         f_rot_total = np.zeros(2)
-        
+        att_dir = vec_to_goal / (dist_to_goal + 1e-6)  # unit vector toward goal
+
         for obs in obstacles:
             obs_pos = np.array([obs.x, obs.y])
             vec_from_obs = ego_pos - obs_pos
             dist = np.linalg.norm(vec_from_obs)
-            
+
             if dist < self.d0:
+                # Angle-aware repulsion: side obstacles get less repulsion
+                obs_dir = vec_from_obs / (dist + 1e-6)
+                cos_angle = np.dot(att_dir, obs_dir)  # 1 = behind (safe), -1 = ahead (block)
+                # Weight: full repulsion for obstacles ahead, reduced for side/behind
+                angle_weight = np.clip((1.0 - cos_angle) / 2.0, 0.15, 1.0)
+
                 ew = self._ethical_weights.get(obs.category, 1.0)
-                rep_mag = self.k_rep * ew * (1.0/dist - 1.0/self.d0) * (1.0/(dist**2))
+                rep_mag = self.k_rep * ew * angle_weight * (1.0/dist - 1.0/self.d0) * (1.0/(dist**2))
                 f_rep = rep_mag * vec_from_obs / dist
+
+                # Limit backward repulsion component — never cancel more than 60% of attraction
+                back_component = np.dot(f_rep, -att_dir)
+                att_mag = np.linalg.norm(f_att)
+                if back_component > 0.6 * att_mag:
+                    f_rep = f_rep - (back_component - 0.6 * att_mag) * (-att_dir)
+
                 f_rep_total += f_rep
-                
+
                 # Rotational component to escape local minima
                 obs_to_goal = goal_pos - obs_pos
                 cross_z = np.cross(vec_from_obs, obs_to_goal)
                 steering_sign = 1.0 if cross_z > 0 else -1.0
-                f_rot = steering_sign * self.k_rot * np.array([-f_rep[1], f_rep[0]]) / dist
+                f_rot = steering_sign * self.k_rot * np.array([-f_rep[1], f_rep[0]]) / (dist + 1e-6)
                 f_rot_total += f_rot
                 
         return f_att, f_rep_total, f_rot_total
