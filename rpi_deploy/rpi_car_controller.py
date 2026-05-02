@@ -30,9 +30,10 @@ EMERGENCY_DIST = 10.0      # Hard stop
 OBSTACLE_DIST = 50.0       # Trigger servo scan + avoidance
 SIDE_CLEAR_DIST = 55.0     # Side distance to confirm obstacle is passed
 
-# YOLO-only "blocked" heuristic (pixel ratio)
-YOLO_BLOCKED_AREA_RATIO = 0.18
-YOLO_BLOCKED_CENTER_TOLERANCE = 0.35
+# YOLO-only distance thresholds (meters, estimated from bbox height)
+YOLO_EMERGENCY_DIST = 0.35   # Hard stop + reverse
+YOLO_AVOID_DIST = 0.80       # Strong avoidance steering
+YOLO_CAUTION_DIST = 1.50     # Moderate avoidance (boost APF repulsion)
 
 # Speed settings (0.0-1.0 gpiozero scale)
 CRUISE_SPEED = 0.2
@@ -246,28 +247,55 @@ def main():
 # ================================================================
 
 def _tick_yolo(rt: RuntimeState, motor, planner):
-    """Pure YOLO+APF cruise. APF handles avoidance continuously.
-    If a large detection dominates the frame center, briefly reverse."""
+    """Pure YOLO+APF cruise with distance-based avoidance.
+    All detections contribute — any obstacle close enough triggers response
+    regardless of category or screen position."""
 
-    visually_blocked = False
-    if rt.cached_detections:
-        for det in rt.cached_detections:
-            box_area = (det.bbox[2] - det.bbox[0]) * (det.bbox[3] - det.bbox[1])
-            center_x = (det.bbox[0] + det.bbox[2]) / 2.0
-            if (box_area / FRAME_AREA > YOLO_BLOCKED_AREA_RATIO and
-                    abs(center_x - CAM_CENTER_X) / CAM_CENTER_X < YOLO_BLOCKED_CENTER_TOLERANCE):
-                visually_blocked = True
-                break
+    # Find the closest threat among all detections
+    closest_dist = 999.0
+    closest_lateral = 0.0   # negative = left of frame, positive = right
+    for det in rt.cached_detections:
+        raw_dist = 480.0 / (det.height + 1e-6) * 0.32
+        tid = det.track_id
+        smoothed = rt.dist_buffer.get(tid, raw_dist)
+        corrected_x = smoothed + 0.12
+        lateral = (det.center[0] - CAM_CENTER_X) / CAM_CENTER_X
+
+        if corrected_x < closest_dist:
+            closest_dist = corrected_x
+            closest_lateral = lateral
 
     if rt.state == STATE_CRUISE:
-        if visually_blocked:
+        if closest_dist < YOLO_EMERGENCY_DIST:
+            # Too close — stop and reverse
             motor.stop()
             rt.state = STATE_BLOCKED
             rt.consecutive_blocked += 1
             if time.time() - rt.last_log_time > 1.0:
-                print("[BLOCKED] Large center detection")
+                print(f"[BLOCKED] Emergency: {closest_dist:.2f}m")
                 rt.last_log_time = time.time()
+
+        elif closest_dist < YOLO_AVOID_DIST:
+            # Close — aggressive avoidance steering, bypass normal APF
+            # Steer away from the obstacle: lateral > 0 (right side) -> steer left (negative)
+            steer = -closest_lateral * 0.8
+            steer = max(-1.0, min(1.0, steer))
+
+            # Slow down proportionally to closeness
+            speed_factor = max(0.3, (closest_dist - YOLO_EMERGENCY_DIST) /
+                               (YOLO_AVOID_DIST - YOLO_EMERGENCY_DIST))
+            motor.curve_move(CRUISE_SPEED * speed_factor, steer)
+
+            if time.time() - rt.last_log_time > 1.0:
+                print(f"[AVOID] {closest_dist:.2f}m steer={steer:.2f}")
+                rt.last_log_time = time.time()
+
+        elif closest_dist < YOLO_CAUTION_DIST:
+            # Moderate — APF with boosted repulsion
+            _apf_cruise(rt, motor, planner, CRUISE_SPEED)
+
         else:
+            # Clear — normal APF cruise
             _apf_cruise(rt, motor, planner, CRUISE_SPEED)
 
     elif rt.state == STATE_BLOCKED:
@@ -277,7 +305,7 @@ def _tick_yolo(rt: RuntimeState, motor, planner):
         time.sleep(0.2)
         rt.state = STATE_CRUISE
         rt.consecutive_blocked = max(0, rt.consecutive_blocked - 1)
-        print("[BLOCKED] Reversed, resuming APF cruise")
+        print(f"[BLOCKED] Reversed from {closest_dist:.2f}m, resuming")
 
 
 # ================================================================
