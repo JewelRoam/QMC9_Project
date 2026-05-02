@@ -35,8 +35,9 @@ AVOID_BACKUP_SPEED = 0.3
 AVOID_TURN_SPEED = 0.2     # Gentle differential turn
 RECOVER_SPEED = 0.2        # Speed during heading recovery
 RECOVERY_BACKUP_DURATION = 0.3
-RECOVERY_TURN_DURATION = 0.6  # ~90° arc, not 180° spin
-RECOVER_DURATION = 1.0     # Time to steer back toward original heading (seconds)
+AVOID_CLEAR_TIME = 0.5     # Front must be clear for this long before exiting AVOID
+AVOID_MAX_DURATION = 5.0   # Safety timeout: max seconds in AVOID before forcing exit
+RECOVER_DURATION = 1.0     # Base time to steer back toward original heading (seconds)
 RECOVER_STEER_RATIO = 0.35 # Counter-steer intensity (0.0-1.0)
 
 # Servo settle time (seconds)
@@ -115,6 +116,7 @@ def main():
     last_log_time = 0
     avoid_action = None
     avoid_start_time = 0
+    avoid_clear_start = 0    # When front first became clear during AVOID
     recover_start_time = 0
     consecutive_blocked = 0
 
@@ -133,6 +135,7 @@ def main():
                 motor.emergency_stop()
                 state = STATE_BLOCKED
                 consecutive_blocked += 1
+                avoid_clear_start = 0
                 if time.time() - last_log_time > 1.0:
                     print(f"!! EMERGENCY STOP: {u_res.distance_cm:.1f}cm")
                     last_log_time = time.time()
@@ -187,6 +190,7 @@ def main():
                     motor.stop()
                     state = STATE_BLOCKED
                     consecutive_blocked += 1
+                    avoid_clear_start = 0
                     if time.time() - last_log_time > 1.0:
                         print(f"[BLOCKED] Front: {front_dist:.1f}cm")
                         last_log_time = time.time()
@@ -257,32 +261,43 @@ def main():
                     avoid_start_time = time.time()
 
             elif state == STATE_AVOID:
-                # Execute gentle forward turn (not in-place spin)
+                # Execute gentle forward turn until obstacle is cleared
                 if avoid_action == "left":
                     motor.turn_left(AVOID_TURN_SPEED)
                 else:
                     motor.turn_right(AVOID_TURN_SPEED)
 
-                elapsed = time.time() - avoid_start_time
-                if elapsed >= RECOVERY_TURN_DURATION:
-                    motor.stop()
-                    time.sleep(0.1)
-                    front_after = ultrasonic.measure_once()
-                    if front_after.valid and front_after.distance_cm < OBSTACLE_DIST:
-                        state = STATE_BLOCKED
-                    else:
-                        # Enter recovery: steer back toward original heading
+                front_now = ultrasonic.measure_once()
+                if front_now.valid and front_now.distance_cm > OBSTACLE_DIST:
+                    # Front is clear — start the clear-time counter
+                    if avoid_clear_start == 0:
+                        avoid_clear_start = time.time()
+                    elif time.time() - avoid_clear_start >= AVOID_CLEAR_TIME:
+                        # Sustained clear — enter recovery
+                        motor.stop()
                         state = STATE_RECOVER
                         recover_start_time = time.time()
-                        print(f"[RECOVER] Heading back (avoid was {avoid_action})")
+                        avoid_elapsed = time.time() - avoid_start_time
+                        print(f"[AVOID] Clear after {avoid_elapsed:.1f}s, entering RECOVER")
+                else:
+                    # Obstacle still detected — reset clear timer
+                    avoid_clear_start = 0
+
+                # Safety timeout: if stuck in AVOID too long, force exit
+                if time.time() - avoid_start_time >= AVOID_MAX_DURATION:
+                    motor.stop()
+                    print(f"[AVOID] Timeout ({AVOID_MAX_DURATION}s), forcing CRUISE")
+                    consecutive_blocked = 0
+                    state = STATE_CRUISE
+                    avoid_clear_start = 0
 
             elif state == STATE_RECOVER:
                 # Steer opposite to avoidance direction to return to original heading
                 counter_steer = RECOVER_STEER_RATIO
                 if avoid_action == "left":
-                    motor.curve_move(RECOVER_SPEED, counter_steer)   # was left -> steer right
+                    motor.curve_move(RECOVER_SPEED, counter_steer)
                 else:
-                    motor.curve_move(RECOVER_SPEED, -counter_steer)  # was right -> steer left
+                    motor.curve_move(RECOVER_SPEED, -counter_steer)
 
                 elapsed = time.time() - recover_start_time
                 if elapsed >= RECOVER_DURATION:
@@ -292,7 +307,6 @@ def main():
                     dist_str = f"{front_check.distance_cm:.1f}cm" if front_check.valid else "---"
                     print(f"[CRUISE] Resumed (front={dist_str})")
                 else:
-                    # Check for obstacles during recovery
                     front_check = ultrasonic.measure_once()
                     if front_check.valid and front_check.distance_cm < OBSTACLE_DIST:
                         motor.stop()
