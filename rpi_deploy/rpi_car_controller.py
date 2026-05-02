@@ -28,20 +28,21 @@ from rpi_deploy.servo_controller import ServoController
 # Ultrasonic thresholds (cm)
 EMERGENCY_DIST = 10.0      # Hard stop
 OBSTACLE_DIST = 50.0       # Trigger servo scan + avoidance
+SIDE_CLEAR_DIST = 55.0     # Side distance to confirm obstacle is passed
 
 # Speed settings (0.0-1.0 gpiozero scale)
 CRUISE_SPEED = 0.2
 AVOID_BACKUP_SPEED = 0.3
-AVOID_TURN_SPEED = 0.2     # Gentle differential turn
-RECOVER_SPEED = 0.2        # Speed during heading recovery
+AVOID_CURVE_SPEED = 0.2    # Forward speed during avoidance turn
+AVOID_TURN_STEER = 0.5     # Steering intensity for avoidance turn
+RECOVER_SPEED = 0.2        # Forward speed during recovery
 RECOVERY_BACKUP_DURATION = 0.3
-AVOID_CLEAR_TIME = 0.5     # Front must be clear for this long before exiting AVOID
-AVOID_MAX_DURATION = 5.0   # Safety timeout: max seconds in AVOID before forcing exit
-RECOVER_DURATION = 1.0     # Base time to steer back toward original heading (seconds)
-RECOVER_STEER_RATIO = 0.35 # Counter-steer intensity (0.0-1.0)
+AVOID_CLEAR_TIME = 0.5     # Front must stay clear this long before side-check
+RECOVER_MAX_DURATION = 2.0 # Safety timeout: max seconds in RECOVER
 
 # Servo settle time (seconds)
 SERVO_SETTLE = 0.25
+SERVO_SIDE_CHECK_INTERVAL = 0.4  # Check side every N seconds in AVOID/RECOVER
 
 # Camera
 CAM_WIDTH = 320
@@ -116,8 +117,10 @@ def main():
     last_log_time = 0
     avoid_action = None
     avoid_start_time = 0
-    avoid_clear_start = 0    # When front first became clear during AVOID
+    avoid_clear_start = 0     # When front first became clear during AVOID
     recover_start_time = 0
+    side_cleared = False      # Has the avoidance-side been confirmed clear?
+    last_side_check_time = 0  # For periodic side-checking in AVOID/RECOVER
     consecutive_blocked = 0
 
     # Cached detections (reused between YOLO frames)
@@ -136,6 +139,7 @@ def main():
                 state = STATE_BLOCKED
                 consecutive_blocked += 1
                 avoid_clear_start = 0
+                side_cleared = False
                 if time.time() - last_log_time > 1.0:
                     print(f"!! EMERGENCY STOP: {u_res.distance_cm:.1f}cm")
                     last_log_time = time.time()
@@ -147,7 +151,7 @@ def main():
 
             # ---- Read camera (only on YOLO frames or GUI frames) ----
             frame = None
-            run_yolo = (yolo_frame_count % YOLO_FRAME_INTERVAL == 0) and state not in (STATE_AVOID, STATE_RECOVER)
+            run_yolo = (yolo_frame_count % YOLO_FRAME_INTERVAL == 0) and state not in (STATE_AVOID, STATE_BLOCKED)
 
             if run_yolo or not args.headless:
                 ret, frame = cap.read()
@@ -191,6 +195,7 @@ def main():
                     state = STATE_BLOCKED
                     consecutive_blocked += 1
                     avoid_clear_start = 0
+                    side_cleared = False
                     if time.time() - last_log_time > 1.0:
                         print(f"[BLOCKED] Front: {front_dist:.1f}cm")
                         last_log_time = time.time()
@@ -234,82 +239,116 @@ def main():
                 # Step 3: Decide direction
                 if dis_left < OBSTACLE_DIST and dis_right < OBSTACLE_DIST:
                     # Both sides blocked -> spin out as last resort
+                    side_cleared = False
                     if consecutive_blocked >= 3:
-                        print("[RECOVER] Both blocked x3, spinning out")
-                        motor.rotate_left(AVOID_TURN_SPEED)
+                        print("[BLOCKED] Both blocked x3, spinning out")
+                        motor.rotate_left(AVOID_CURVE_SPEED)
                         time.sleep(1.5)
                         motor.stop()
                         consecutive_blocked = 0
                         state = STATE_CRUISE
                     else:
-                        print(f"[RECOVER] Both blocked L={dis_left:.0f} R={dis_right:.0f}, spin")
-                        motor.rotate_left(AVOID_TURN_SPEED)
+                        print(f"[BLOCKED] Both blocked L={dis_left:.0f} R={dis_right:.0f}, spin")
+                        motor.rotate_left(AVOID_CURVE_SPEED)
                         time.sleep(0.8)
                         motor.stop()
                         state = STATE_CRUISE
                 elif dis_left > dis_right:
-                    # More room on the left -> gentle forward-left turn
+                    # More room on the left -> forward-left curve
                     avoid_action = "left"
-                    print(f"[AVOID] Turn LEFT (L={dis_left:.0f} > R={dis_right:.0f})")
+                    print(f"[AVOID] Curve LEFT (L={dis_left:.0f} > R={dis_right:.0f})")
                     state = STATE_AVOID
                     avoid_start_time = time.time()
+                    avoid_clear_start = 0
+                    side_cleared = False
                 else:
-                    # More room on the right -> gentle forward-right turn
+                    # More room on the right -> forward-right curve
                     avoid_action = "right"
-                    print(f"[AVOID] Turn RIGHT (R={dis_right:.0f} > L={dis_left:.0f})")
+                    print(f"[AVOID] Curve RIGHT (R={dis_right:.0f} > L={dis_left:.0f})")
                     state = STATE_AVOID
                     avoid_start_time = time.time()
+                    avoid_clear_start = 0
+                    side_cleared = False
 
             elif state == STATE_AVOID:
-                # Execute gentle forward turn until obstacle is cleared
+                # Forward curve in avoidance direction to gain lateral displacement
                 if avoid_action == "left":
-                    motor.turn_left(AVOID_TURN_SPEED)
+                    motor.curve_move(AVOID_CURVE_SPEED, -AVOID_TURN_STEER)
                 else:
-                    motor.turn_right(AVOID_TURN_SPEED)
+                    motor.curve_move(AVOID_CURVE_SPEED, AVOID_TURN_STEER)
 
                 front_now = ultrasonic.measure_once()
                 if front_now.valid and front_now.distance_cm > OBSTACLE_DIST:
-                    # Front is clear — start the clear-time counter
                     if avoid_clear_start == 0:
                         avoid_clear_start = time.time()
                     elif time.time() - avoid_clear_start >= AVOID_CLEAR_TIME:
-                        # Sustained clear — enter recovery
-                        motor.stop()
-                        state = STATE_RECOVER
-                        recover_start_time = time.time()
-                        avoid_elapsed = time.time() - avoid_start_time
-                        print(f"[AVOID] Clear after {avoid_elapsed:.1f}s, entering RECOVER")
+                        # Front clear — check side; if clear too, go straight to CRUISE
+                        side_dist = _check_side_distance(ultrasonic, servo, avoid_action)
+                        if side_dist > SIDE_CLEAR_DIST:
+                            side_cleared = True
+                            servo.center_ultrasonic()
+                            motor.stop()
+                            consecutive_blocked = max(0, consecutive_blocked - 1)
+                            state = STATE_CRUISE
+                            avoid_elapsed = time.time() - avoid_start_time
+                            print(f"[CRUISE] Obstacle cleared in {avoid_elapsed:.1f}s (side={side_dist:.0f}cm)")
+                        else:
+                            # Front clear but side still blocked — enter RECOVER
+                            servo.center_ultrasonic()
+                            motor.stop()
+                            state = STATE_RECOVER
+                            recover_start_time = time.time()
+                            avoid_elapsed = time.time() - avoid_start_time
+                            print(f"[RECOVER] Front clear, side={side_dist:.0f}cm — continuing")
                 else:
-                    # Obstacle still detected — reset clear timer
                     avoid_clear_start = 0
 
-                # Safety timeout: if stuck in AVOID too long, force exit
-                if time.time() - avoid_start_time >= AVOID_MAX_DURATION:
+                # Safety timeout
+                if time.time() - avoid_start_time >= 6.0:
                     motor.stop()
-                    print(f"[AVOID] Timeout ({AVOID_MAX_DURATION}s), forcing CRUISE")
+                    servo.center_ultrasonic()
+                    side_cleared = False
+                    print("[AVOID] Timeout, forcing CRUISE")
                     consecutive_blocked = 0
                     state = STATE_CRUISE
-                    avoid_clear_start = 0
 
             elif state == STATE_RECOVER:
-                # Steer opposite to avoidance direction to return to original heading
-                counter_steer = RECOVER_STEER_RATIO
-                if avoid_action == "left":
-                    motor.curve_move(RECOVER_SPEED, counter_steer)
+                # Drive forward with APF steering; periodically check side clearance
+                out = planner.compute(0, 0, 0, 8.0, 3.0, 0, cached_apf_obs)
+                steer = out.target_steering * 0.4
+                if abs(steer) < 0.05 and cached_apf_obs:
+                    closest = min(cached_apf_obs, key=lambda o: o.distance)
+                    if closest.y > 0.05:
+                        steer = -0.3
+                    elif closest.y < -0.05:
+                        steer = 0.3
+                if not out.emergency_brake and out.target_speed > 0.1:
+                    motor.curve_move(RECOVER_SPEED, steer)
                 else:
-                    motor.curve_move(RECOVER_SPEED, -counter_steer)
+                    motor.curve_move(RECOVER_SPEED, 0.0)
+
+                # Periodic side check
+                now = time.time()
+                if now - last_side_check_time >= SERVO_SIDE_CHECK_INTERVAL:
+                    last_side_check_time = now
+                    side_dist = _check_side_distance(ultrasonic, servo, avoid_action)
+                    if side_dist > SIDE_CLEAR_DIST:
+                        side_cleared = True
+                    servo.center_ultrasonic()
 
                 elapsed = time.time() - recover_start_time
-                if elapsed >= RECOVER_DURATION:
+                if side_cleared or elapsed >= RECOVER_MAX_DURATION:
                     consecutive_blocked = max(0, consecutive_blocked - 1)
                     state = STATE_CRUISE
                     front_check = ultrasonic.measure_once()
                     dist_str = f"{front_check.distance_cm:.1f}cm" if front_check.valid else "---"
-                    print(f"[CRUISE] Resumed (front={dist_str})")
+                    reason = "side clear" if side_cleared else "timeout"
+                    print(f"[CRUISE] Resumed ({reason}, front={dist_str})")
                 else:
                     front_check = ultrasonic.measure_once()
                     if front_check.valid and front_check.distance_cm < OBSTACLE_DIST:
                         motor.stop()
+                        side_cleared = False
                         state = STATE_BLOCKED
                         consecutive_blocked += 1
             # ---- Visual Overlay (only on frames we already read) ----
@@ -349,6 +388,16 @@ def _scan_right(sensor: UltrasonicSensor, servo: ServoController) -> float:
     time.sleep(SERVO_SETTLE)
     reading = sensor.measure_once()
     return reading.distance_cm if reading.valid else 999.0
+
+
+def _check_side_distance(sensor: UltrasonicSensor, servo: ServoController,
+                         avoid_action: str) -> float:
+    """Check distance on the avoidance side to verify the obstacle is passed."""
+    # Avoidance side: if we curved left, obstacle is on right; check right side
+    side = "right" if avoid_action == "left" else "left"
+    if side == "left":
+        return _scan_left(sensor, servo)
+    return _scan_right(sensor, servo)
 
 # ---- Overlay Drawing ----
 
