@@ -1,7 +1,7 @@
 """
-NexusPilot: RPi Car Controller v2
-- YOLO vision (throttled to 3 FPS) + servo-enhanced ultrasonic scanning
-- State-machine based obstacle avoidance (inspired by makerobo Case 7)
+NexusPilot: RPi Car Controller v3
+- Default: YOLO+APF only (no ultrasonic required)
+- --enable-ultrasonic: full state machine with ultrasonic scanning and side-verify
 - CPU-optimized for Raspberry Pi 5
 """
 import os
@@ -10,6 +10,8 @@ import time
 import argparse
 import cv2
 import numpy as np
+from dataclasses import dataclass, field
+from typing import Optional
 
 # Force RPi 5 GPIO chip index
 os.environ["LG_CHIP"] = "0"
@@ -20,8 +22,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from perception.detector import YOLODetector
 from planning.apf_planner import APFPlanner, Obstacle
 from rpi_deploy.motor_driver import MotorController
-from rpi_deploy.ultrasonic_sensor import UltrasonicSensor
-from rpi_deploy.servo_controller import ServoController
 
 # ---- Constants ----
 
@@ -30,31 +30,36 @@ EMERGENCY_DIST = 10.0      # Hard stop
 OBSTACLE_DIST = 50.0       # Trigger servo scan + avoidance
 SIDE_CLEAR_DIST = 55.0     # Side distance to confirm obstacle is passed
 
+# YOLO-only "blocked" heuristic (pixel ratio)
+YOLO_BLOCKED_AREA_RATIO = 0.18
+YOLO_BLOCKED_CENTER_TOLERANCE = 0.35
+
 # Speed settings (0.0-1.0 gpiozero scale)
 CRUISE_SPEED = 0.2
 AVOID_BACKUP_SPEED = 0.3
-AVOID_CURVE_SPEED = 0.2    # Forward speed during avoidance turn
-AVOID_TURN_STEER = 0.5     # Steering intensity for avoidance turn
-RECOVER_SPEED = 0.2        # Forward speed during recovery
+AVOID_CURVE_SPEED = 0.2
+AVOID_TURN_STEER = 0.5
+RECOVER_SPEED = 0.2
 RECOVERY_BACKUP_DURATION = 0.3
-AVOID_CLEAR_TIME = 0.5     # Front must stay clear this long before side-check
-RECOVER_MAX_DURATION = 2.0 # Safety timeout: max seconds in RECOVER
+AVOID_CLEAR_TIME = 0.5
+RECOVER_MAX_DURATION = 2.0
 
 # Servo settle time (seconds)
 SERVO_SETTLE = 0.25
-SERVO_SIDE_CHECK_INTERVAL = 0.4  # Check side every N seconds in AVOID/RECOVER
+SERVO_SIDE_CHECK_INTERVAL = 0.4
 
 # Camera
 CAM_WIDTH = 320
 CAM_HEIGHT = 320
 CAM_CENTER_X = CAM_WIDTH / 2.0
+FRAME_AREA = CAM_WIDTH * CAM_HEIGHT
 
-# YOLO inference throttling: run detection every N frames
-YOLO_FRAME_INTERVAL = 2    # ~6 FPS at 12 Hz main loop
-YOLO_CONFIDENCE_THRESHOLD = 0.3  # Lower threshold for better detection rate
+# YOLO inference throttling
+YOLO_FRAME_INTERVAL = 2
+YOLO_CONFIDENCE_THRESHOLD = 0.3
 
-# Main loop target: 12 Hz (ultrasonic-only frames are ~80 µs, YOLO frames are ~200 ms)
-MAIN_LOOP_INTERVAL = 0.083  # ~12 FPS for ultrasonic safety checks
+# Main loop target: 12 Hz
+MAIN_LOOP_INTERVAL = 0.083
 
 # State machine
 STATE_CRUISE = "CRUISE"
@@ -63,20 +68,48 @@ STATE_AVOID = "AVOID"
 STATE_RECOVER = "RECOVER"
 
 
+@dataclass
+class RuntimeState:
+    """Shared mutable state for the main loop."""
+    state: str = STATE_CRUISE
+    dist_buffer: dict = field(default_factory=dict)
+    last_log_time: float = 0.0
+    avoid_action: Optional[str] = None
+    avoid_start_time: float = 0.0
+    avoid_clear_start: float = 0.0
+    recover_start_time: float = 0.0
+    side_cleared: bool = False
+    last_side_check_time: float = 0.0
+    consecutive_blocked: int = 0
+    cached_detections: list = field(default_factory=list)
+    cached_apf_obs: list = field(default_factory=list)
+    yolo_frame_count: int = 0
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--headless", action="store_true",
                         help="Run without X11 window display (saves ~10% CPU)")
+    parser.add_argument("--enable-ultrasonic", action="store_true",
+                        help="Enable ultrasonic sensor for obstacle detection and servo scanning")
     args = parser.parse_args()
 
     # ---- Hardware Init ----
-    print("[INIT] Starting Hardware...")
+    print("[INIT] Starting hardware...")
     motor = MotorController()
-    ultrasonic = UltrasonicSensor()
-    servo = ServoController()
-    servo.center_ultrasonic()
-    time.sleep(0.5)
-    print("[INIT] Hardware OK.")
+
+    ultrasonic = None
+    servo = None
+    if args.enable_ultrasonic:
+        from rpi_deploy.ultrasonic_sensor import UltrasonicSensor
+        from rpi_deploy.servo_controller import ServoController
+        ultrasonic = UltrasonicSensor()
+        servo = ServoController()
+        servo.center_ultrasonic()
+        time.sleep(0.5)
+        print("[INIT] Ultrasonic + Servo enabled.")
+    else:
+        print("[INIT] YOLO-only mode (no ultrasonic).")
 
     # ---- Camera Init ----
     cap = cv2.VideoCapture(0)
@@ -85,7 +118,6 @@ def main():
         return
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
-    # Reduce camera FPS to save CPU
     cap.set(cv2.CAP_PROP_FPS, 15)
 
     # ---- AI Init ----
@@ -108,50 +140,40 @@ def main():
     detector.detect(np.zeros((320, 320, 3), dtype=np.uint8))
 
     print("\n" + "=" * 40)
-    print(" NEXUSPILOT: READY FOR MISSION ")
+    mode_str = "ULTRASONIC" if args.enable_ultrasonic else "YOLO-ONLY"
+    print(f" NEXUSPILOT: READY ({mode_str}) ")
     print("=" * 40)
 
-    # ---- Runtime State ----
-    state = STATE_CRUISE
-    dist_buffer = {}
-    last_log_time = 0
-    avoid_action = None
-    avoid_start_time = 0
-    avoid_clear_start = 0     # When front first became clear during AVOID
-    recover_start_time = 0
-    side_cleared = False      # Has the avoidance-side been confirmed clear?
-    last_side_check_time = 0  # For periodic side-checking in AVOID/RECOVER
-    consecutive_blocked = 0
-
-    # Cached detections (reused between YOLO frames)
-    cached_detections = []
-    cached_apf_obs = []
-    yolo_frame_count = 0
+    rt = RuntimeState()
 
     try:
         while True:
             loop_start = time.perf_counter()
 
-            # ---- Safety: Emergency ultrasonic check ----
-            u_res = ultrasonic.measure_once()
-            if u_res.valid and u_res.distance_cm < EMERGENCY_DIST:
-                motor.emergency_stop()
-                state = STATE_BLOCKED
-                consecutive_blocked += 1
-                avoid_clear_start = 0
-                side_cleared = False
-                if time.time() - last_log_time > 1.0:
-                    print(f"!! EMERGENCY STOP: {u_res.distance_cm:.1f}cm")
-                    last_log_time = time.time()
-                # Flush stale camera frame
-                cap.read()
-                # Sleep briefly to avoid tight spin loop
-                time.sleep(0.05)
-                continue
+            # ---- Ultrasonic emergency check ----
+            u_res = None
+            front_dist = 999.0
+            if ultrasonic is not None:
+                u_res = ultrasonic.measure_once()
+                front_dist = u_res.distance_cm if u_res.valid else 999.0
 
-            # ---- Read camera (only on YOLO frames or GUI frames) ----
+                if u_res.valid and u_res.distance_cm < EMERGENCY_DIST:
+                    motor.emergency_stop()
+                    rt.state = STATE_BLOCKED
+                    rt.consecutive_blocked += 1
+                    rt.avoid_clear_start = 0
+                    rt.side_cleared = False
+                    if time.time() - rt.last_log_time > 1.0:
+                        print(f"!! EMERGENCY STOP: {u_res.distance_cm:.1f}cm")
+                        rt.last_log_time = time.time()
+                    cap.read()
+                    time.sleep(0.05)
+                    continue
+
+            # ---- Read camera ----
             frame = None
-            run_yolo = (yolo_frame_count % YOLO_FRAME_INTERVAL == 0) and state not in (STATE_AVOID, STATE_BLOCKED)
+            skip_yolo_states = (STATE_AVOID, STATE_BLOCKED) if args.enable_ultrasonic else ()
+            run_yolo = (rt.yolo_frame_count % YOLO_FRAME_INTERVAL == 0) and rt.state not in skip_yolo_states
 
             if run_yolo or not args.headless:
                 ret, frame = cap.read()
@@ -159,201 +181,40 @@ def main():
                     frame = None
 
             if run_yolo and frame is not None:
-                # ---- YOLO Perception (throttled to ~3 FPS) ----
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                cached_detections = detector.detect(rgb)
-                obstacles = detector.get_obstacles(cached_detections)
+                rt.cached_detections = detector.detect(rgb)
+                obstacles = detector.get_obstacles(rt.cached_detections)
 
-                # Rebuild APF obstacle list (cached until next YOLO frame)
-                cached_apf_obs = []
+                rt.cached_apf_obs = []
                 for det in obstacles:
                     raw_dist = 480.0 / (det.height + 1e-6) * 0.32
                     tid = det.track_id
-                    if tid not in dist_buffer:
-                        dist_buffer[tid] = raw_dist
-                    dist_buffer[tid] = 0.7 * dist_buffer[tid] + 0.3 * raw_dist
-                    corrected_x = dist_buffer[tid] + 0.12
+                    if tid not in rt.dist_buffer:
+                        rt.dist_buffer[tid] = raw_dist
+                    rt.dist_buffer[tid] = 0.7 * rt.dist_buffer[tid] + 0.3 * raw_dist
+                    corrected_x = rt.dist_buffer[tid] + 0.12
                     lateral = (det.center[0] - CAM_CENTER_X) / CAM_CENTER_X * corrected_x * 0.55
-                    cached_apf_obs.append(Obstacle(
+                    rt.cached_apf_obs.append(Obstacle(
                         x=corrected_x, y=lateral,
                         distance=corrected_x, category=det.category
                     ))
 
-            yolo_frame_count += 1
+            rt.yolo_frame_count += 1
 
-            # Prune stale track IDs from dist_buffer (tracker already cleaned them)
-            if yolo_frame_count % 30 == 0:
-                active_ids = {det.track_id for det in cached_detections if det.track_id > 0}
-                dist_buffer = {tid: v for tid, v in dist_buffer.items() if tid in active_ids}
+            # Prune stale track IDs
+            if rt.yolo_frame_count % 30 == 0:
+                active_ids = {d.track_id for d in rt.cached_detections if d.track_id > 0}
+                rt.dist_buffer = {tid: v for tid, v in rt.dist_buffer.items() if tid in active_ids}
 
             # ---- State Machine ----
-            front_dist = u_res.distance_cm if u_res.valid else 999.0
+            if args.enable_ultrasonic:
+                _tick_ultrasonic(rt, motor, ultrasonic, servo, planner, front_dist)
+            else:
+                _tick_yolo(rt, motor, planner)
 
-            if state == STATE_CRUISE:
-                if front_dist < OBSTACLE_DIST:
-                    motor.stop()
-                    state = STATE_BLOCKED
-                    consecutive_blocked += 1
-                    avoid_clear_start = 0
-                    side_cleared = False
-                    if time.time() - last_log_time > 1.0:
-                        print(f"[BLOCKED] Front: {front_dist:.1f}cm")
-                        last_log_time = time.time()
-
-                else:
-                    # Clear -> forward with APF steering + screen-side bias
-                    out = planner.compute(0, 0, 0, 8.0, 3.0, 0, cached_apf_obs)
-                    steer = out.target_steering * 0.4
-
-                    if abs(steer) < 0.05 and cached_apf_obs:
-                        closest = min(cached_apf_obs, key=lambda o: o.distance)
-                        if closest.y > 0.05:
-                            steer = -0.3  # obstacle on right -> steer left
-                        elif closest.y < -0.05:
-                            steer = 0.3   # obstacle on left -> steer right
-
-                    if not out.emergency_brake and out.target_speed > 0.1:
-                        motor.curve_move(CRUISE_SPEED, steer)
-                    else:
-                        motor.stop()
-
-                    if time.time() - last_log_time > 3.0:
-                        print(f"[CRUISE] Front: {front_dist:.1f}cm | Det: {len(cached_apf_obs)} | steer={steer:.2f}")
-                        last_log_time = time.time()
-
-            elif state == STATE_BLOCKED:
-                # Step 1: Back up to create clearance
-                motor.move_backward(AVOID_BACKUP_SPEED)
-                time.sleep(RECOVERY_BACKUP_DURATION)
-                motor.stop()
-                time.sleep(0.2)
-
-                # Step 2: Scan left and right with ultrasonic servo
-                dis_left = _scan_left(ultrasonic, servo)
-                dis_right = _scan_right(ultrasonic, servo)
-
-                # Re-center servo
-                servo.center_ultrasonic()
-                time.sleep(SERVO_SETTLE)
-
-                # Step 3: Decide direction
-                if dis_left < OBSTACLE_DIST and dis_right < OBSTACLE_DIST:
-                    # Both sides blocked -> spin out as last resort
-                    side_cleared = False
-                    if consecutive_blocked >= 3:
-                        print("[BLOCKED] Both blocked x3, spinning out")
-                        motor.rotate_left(AVOID_CURVE_SPEED)
-                        time.sleep(1.5)
-                        motor.stop()
-                        consecutive_blocked = 0
-                        state = STATE_CRUISE
-                    else:
-                        print(f"[BLOCKED] Both blocked L={dis_left:.0f} R={dis_right:.0f}, spin")
-                        motor.rotate_left(AVOID_CURVE_SPEED)
-                        time.sleep(0.8)
-                        motor.stop()
-                        state = STATE_CRUISE
-                elif dis_left > dis_right:
-                    # More room on the left -> forward-left curve
-                    avoid_action = "left"
-                    print(f"[AVOID] Curve LEFT (L={dis_left:.0f} > R={dis_right:.0f})")
-                    state = STATE_AVOID
-                    avoid_start_time = time.time()
-                    avoid_clear_start = 0
-                    side_cleared = False
-                else:
-                    # More room on the right -> forward-right curve
-                    avoid_action = "right"
-                    print(f"[AVOID] Curve RIGHT (R={dis_right:.0f} > L={dis_left:.0f})")
-                    state = STATE_AVOID
-                    avoid_start_time = time.time()
-                    avoid_clear_start = 0
-                    side_cleared = False
-
-            elif state == STATE_AVOID:
-                # Forward curve in avoidance direction to gain lateral displacement
-                if avoid_action == "left":
-                    motor.curve_move(AVOID_CURVE_SPEED, -AVOID_TURN_STEER)
-                else:
-                    motor.curve_move(AVOID_CURVE_SPEED, AVOID_TURN_STEER)
-
-                front_now = ultrasonic.measure_once()
-                if front_now.valid and front_now.distance_cm > OBSTACLE_DIST:
-                    if avoid_clear_start == 0:
-                        avoid_clear_start = time.time()
-                    elif time.time() - avoid_clear_start >= AVOID_CLEAR_TIME:
-                        # Front clear — check side; if clear too, go straight to CRUISE
-                        side_dist = _check_side_distance(ultrasonic, servo, avoid_action)
-                        if side_dist > SIDE_CLEAR_DIST:
-                            side_cleared = True
-                            servo.center_ultrasonic()
-                            motor.stop()
-                            consecutive_blocked = max(0, consecutive_blocked - 1)
-                            state = STATE_CRUISE
-                            avoid_elapsed = time.time() - avoid_start_time
-                            print(f"[CRUISE] Obstacle cleared in {avoid_elapsed:.1f}s (side={side_dist:.0f}cm)")
-                        else:
-                            # Front clear but side still blocked — enter RECOVER
-                            servo.center_ultrasonic()
-                            motor.stop()
-                            state = STATE_RECOVER
-                            recover_start_time = time.time()
-                            avoid_elapsed = time.time() - avoid_start_time
-                            print(f"[RECOVER] Front clear, side={side_dist:.0f}cm — continuing")
-                else:
-                    avoid_clear_start = 0
-
-                # Safety timeout
-                if time.time() - avoid_start_time >= 6.0:
-                    motor.stop()
-                    servo.center_ultrasonic()
-                    side_cleared = False
-                    print("[AVOID] Timeout, forcing CRUISE")
-                    consecutive_blocked = 0
-                    state = STATE_CRUISE
-
-            elif state == STATE_RECOVER:
-                # Drive forward with APF steering; periodically check side clearance
-                out = planner.compute(0, 0, 0, 8.0, 3.0, 0, cached_apf_obs)
-                steer = out.target_steering * 0.4
-                if abs(steer) < 0.05 and cached_apf_obs:
-                    closest = min(cached_apf_obs, key=lambda o: o.distance)
-                    if closest.y > 0.05:
-                        steer = -0.3
-                    elif closest.y < -0.05:
-                        steer = 0.3
-                if not out.emergency_brake and out.target_speed > 0.1:
-                    motor.curve_move(RECOVER_SPEED, steer)
-                else:
-                    motor.curve_move(RECOVER_SPEED, 0.0)
-
-                # Periodic side check
-                now = time.time()
-                if now - last_side_check_time >= SERVO_SIDE_CHECK_INTERVAL:
-                    last_side_check_time = now
-                    side_dist = _check_side_distance(ultrasonic, servo, avoid_action)
-                    if side_dist > SIDE_CLEAR_DIST:
-                        side_cleared = True
-                    servo.center_ultrasonic()
-
-                elapsed = time.time() - recover_start_time
-                if side_cleared or elapsed >= RECOVER_MAX_DURATION:
-                    consecutive_blocked = max(0, consecutive_blocked - 1)
-                    state = STATE_CRUISE
-                    front_check = ultrasonic.measure_once()
-                    dist_str = f"{front_check.distance_cm:.1f}cm" if front_check.valid else "---"
-                    reason = "side clear" if side_cleared else "timeout"
-                    print(f"[CRUISE] Resumed ({reason}, front={dist_str})")
-                else:
-                    front_check = ultrasonic.measure_once()
-                    if front_check.valid and front_check.distance_cm < OBSTACLE_DIST:
-                        motor.stop()
-                        side_cleared = False
-                        state = STATE_BLOCKED
-                        consecutive_blocked += 1
-            # ---- Visual Overlay (only on frames we already read) ----
+            # ---- Visual Overlay ----
             if not args.headless and frame is not None:
-                _draw_overlay(frame, cached_detections, state, u_res)
+                _draw_overlay(frame, rt.cached_detections, rt.state, u_res)
                 cv2.imshow("NexusPilot Monitor", frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
@@ -367,14 +228,227 @@ def main():
         print("\n[SHUTDOWN] Manual halt received.")
     finally:
         motor.cleanup()
-        servo.cleanup()
+        if servo is not None:
+            servo.cleanup()
         cap.release()
         cv2.destroyAllWindows()
 
 
+# ================================================================
+# YOLO-only state machine
+# ================================================================
+
+def _tick_yolo(rt: RuntimeState, motor, planner):
+    """Pure YOLO+APF cruise. APF handles avoidance continuously.
+    If a large detection dominates the frame center, briefly reverse."""
+
+    visually_blocked = False
+    if rt.cached_detections:
+        for det in rt.cached_detections:
+            box_area = (det.bbox[2] - det.bbox[0]) * (det.bbox[3] - det.bbox[1])
+            center_x = (det.bbox[0] + det.bbox[2]) / 2.0
+            if (box_area / FRAME_AREA > YOLO_BLOCKED_AREA_RATIO and
+                    abs(center_x - CAM_CENTER_X) / CAM_CENTER_X < YOLO_BLOCKED_CENTER_TOLERANCE):
+                visually_blocked = True
+                break
+
+    if rt.state == STATE_CRUISE:
+        if visually_blocked:
+            motor.stop()
+            rt.state = STATE_BLOCKED
+            rt.consecutive_blocked += 1
+            if time.time() - rt.last_log_time > 1.0:
+                print("[BLOCKED] Large center detection")
+                rt.last_log_time = time.time()
+        else:
+            out = planner.compute(0, 0, 0, 8.0, 3.0, 0, rt.cached_apf_obs)
+            steer = out.target_steering * 0.4
+
+            if abs(steer) < 0.05 and rt.cached_apf_obs:
+                closest = min(rt.cached_apf_obs, key=lambda o: o.distance)
+                if closest.y > 0.05:
+                    steer = -0.3
+                elif closest.y < -0.05:
+                    steer = 0.3
+
+            if not out.emergency_brake and out.target_speed > 0.1:
+                motor.curve_move(CRUISE_SPEED, steer)
+            else:
+                motor.stop()
+
+            if time.time() - rt.last_log_time > 3.0:
+                print(f"[CRUISE] Det:{len(rt.cached_apf_obs)} steer={steer:.2f}")
+                rt.last_log_time = time.time()
+
+    elif rt.state == STATE_BLOCKED:
+        motor.move_backward(AVOID_BACKUP_SPEED)
+        time.sleep(RECOVERY_BACKUP_DURATION)
+        motor.stop()
+        time.sleep(0.2)
+        rt.state = STATE_CRUISE
+        rt.consecutive_blocked = max(0, rt.consecutive_blocked - 1)
+        print("[BLOCKED] Reversed, resuming APF cruise")
+
+
+# ================================================================
+# Ultrasonic-enabled state machine
+# ================================================================
+
+def _tick_ultrasonic(rt: RuntimeState, motor, ultrasonic, servo, planner, front_dist):
+    """Full state machine with ultrasonic scanning, servo avoidance,
+    side verification, and APF-assisted recovery."""
+
+    if rt.state == STATE_CRUISE:
+        if front_dist < OBSTACLE_DIST:
+            motor.stop()
+            rt.state = STATE_BLOCKED
+            rt.consecutive_blocked += 1
+            rt.avoid_clear_start = 0
+            rt.side_cleared = False
+            if time.time() - rt.last_log_time > 1.0:
+                print(f"[BLOCKED] Front: {front_dist:.1f}cm")
+                rt.last_log_time = time.time()
+        else:
+            out = planner.compute(0, 0, 0, 8.0, 3.0, 0, rt.cached_apf_obs)
+            steer = out.target_steering * 0.4
+
+            if abs(steer) < 0.05 and rt.cached_apf_obs:
+                closest = min(rt.cached_apf_obs, key=lambda o: o.distance)
+                if closest.y > 0.05:
+                    steer = -0.3
+                elif closest.y < -0.05:
+                    steer = 0.3
+
+            if not out.emergency_brake and out.target_speed > 0.1:
+                motor.curve_move(CRUISE_SPEED, steer)
+            else:
+                motor.stop()
+
+            if time.time() - rt.last_log_time > 3.0:
+                print(f"[CRUISE] F:{front_dist:.0f}cm Det:{len(rt.cached_apf_obs)} steer={steer:.2f}")
+                rt.last_log_time = time.time()
+
+    elif rt.state == STATE_BLOCKED:
+        motor.move_backward(AVOID_BACKUP_SPEED)
+        time.sleep(RECOVERY_BACKUP_DURATION)
+        motor.stop()
+        time.sleep(0.2)
+
+        dis_left = _scan_left(ultrasonic, servo)
+        dis_right = _scan_right(ultrasonic, servo)
+        servo.center_ultrasonic()
+        time.sleep(SERVO_SETTLE)
+
+        if dis_left < OBSTACLE_DIST and dis_right < OBSTACLE_DIST:
+            rt.side_cleared = False
+            if rt.consecutive_blocked >= 3:
+                print("[BLOCKED] Both blocked x3, spinning out")
+                motor.rotate_left(AVOID_CURVE_SPEED)
+                time.sleep(1.5)
+                motor.stop()
+                rt.consecutive_blocked = 0
+                rt.state = STATE_CRUISE
+            else:
+                print(f"[BLOCKED] Both blocked L={dis_left:.0f} R={dis_right:.0f}, spin")
+                motor.rotate_left(AVOID_CURVE_SPEED)
+                time.sleep(0.8)
+                motor.stop()
+                rt.state = STATE_CRUISE
+        elif dis_left > dis_right:
+            rt.avoid_action = "left"
+            print(f"[AVOID] Curve LEFT (L={dis_left:.0f} > R={dis_right:.0f})")
+            rt.state = STATE_AVOID
+            rt.avoid_start_time = time.time()
+            rt.avoid_clear_start = 0
+            rt.side_cleared = False
+        else:
+            rt.avoid_action = "right"
+            print(f"[AVOID] Curve RIGHT (R={dis_right:.0f} > L={dis_left:.0f})")
+            rt.state = STATE_AVOID
+            rt.avoid_start_time = time.time()
+            rt.avoid_clear_start = 0
+            rt.side_cleared = False
+
+    elif rt.state == STATE_AVOID:
+        if rt.avoid_action == "left":
+            motor.curve_move(AVOID_CURVE_SPEED, -AVOID_TURN_STEER)
+        else:
+            motor.curve_move(AVOID_CURVE_SPEED, AVOID_TURN_STEER)
+
+        front_now = ultrasonic.measure_once()
+        if front_now.valid and front_now.distance_cm > OBSTACLE_DIST:
+            if rt.avoid_clear_start == 0:
+                rt.avoid_clear_start = time.time()
+            elif time.time() - rt.avoid_clear_start >= AVOID_CLEAR_TIME:
+                side_dist = _check_side_distance(ultrasonic, servo, rt.avoid_action)
+                if side_dist > SIDE_CLEAR_DIST:
+                    rt.side_cleared = True
+                    servo.center_ultrasonic()
+                    motor.stop()
+                    rt.consecutive_blocked = max(0, rt.consecutive_blocked - 1)
+                    rt.state = STATE_CRUISE
+                    elapsed = time.time() - rt.avoid_start_time
+                    print(f"[CRUISE] Cleared in {elapsed:.1f}s (side={side_dist:.0f}cm)")
+                else:
+                    servo.center_ultrasonic()
+                    motor.stop()
+                    rt.state = STATE_RECOVER
+                    rt.recover_start_time = time.time()
+                    elapsed = time.time() - rt.avoid_start_time
+                    print(f"[RECOVER] Front clear, side={side_dist:.0f}cm")
+        else:
+            rt.avoid_clear_start = 0
+
+        if time.time() - rt.avoid_start_time >= 6.0:
+            motor.stop()
+            servo.center_ultrasonic()
+            rt.side_cleared = False
+            print("[AVOID] Timeout, forcing CRUISE")
+            rt.consecutive_blocked = 0
+            rt.state = STATE_CRUISE
+
+    elif rt.state == STATE_RECOVER:
+        out = planner.compute(0, 0, 0, 8.0, 3.0, 0, rt.cached_apf_obs)
+        steer = out.target_steering * 0.4
+        if abs(steer) < 0.05 and rt.cached_apf_obs:
+            closest = min(rt.cached_apf_obs, key=lambda o: o.distance)
+            if closest.y > 0.05:
+                steer = -0.3
+            elif closest.y < -0.05:
+                steer = 0.3
+        if not out.emergency_brake and out.target_speed > 0.1:
+            motor.curve_move(RECOVER_SPEED, steer)
+        else:
+            motor.curve_move(RECOVER_SPEED, 0.0)
+
+        now = time.time()
+        if now - rt.last_side_check_time >= SERVO_SIDE_CHECK_INTERVAL:
+            rt.last_side_check_time = now
+            side_dist = _check_side_distance(ultrasonic, servo, rt.avoid_action)
+            if side_dist > SIDE_CLEAR_DIST:
+                rt.side_cleared = True
+            servo.center_ultrasonic()
+
+        elapsed = time.time() - rt.recover_start_time
+        if rt.side_cleared or elapsed >= RECOVER_MAX_DURATION:
+            rt.consecutive_blocked = max(0, rt.consecutive_blocked - 1)
+            rt.state = STATE_CRUISE
+            fc = ultrasonic.measure_once()
+            ds = f"{fc.distance_cm:.1f}cm" if fc.valid else "---"
+            reason = "side clear" if rt.side_cleared else "timeout"
+            print(f"[CRUISE] Resumed ({reason}, front={ds})")
+        else:
+            fc = ultrasonic.measure_once()
+            if fc.valid and fc.distance_cm < OBSTACLE_DIST:
+                motor.stop()
+                rt.side_cleared = False
+                rt.state = STATE_BLOCKED
+                rt.consecutive_blocked += 1
+
+
 # ---- Servo Scan Helpers ----
 
-def _scan_left(sensor: UltrasonicSensor, servo: ServoController) -> float:
+def _scan_left(sensor, servo):
     """Scan left (~155 degrees) and return distance in cm."""
     servo.set_ultrasonic_angle(155)
     time.sleep(SERVO_SETTLE)
@@ -382,7 +456,7 @@ def _scan_left(sensor: UltrasonicSensor, servo: ServoController) -> float:
     return reading.distance_cm if reading.valid else 999.0
 
 
-def _scan_right(sensor: UltrasonicSensor, servo: ServoController) -> float:
+def _scan_right(sensor, servo):
     """Scan right (~85 degrees) and return distance in cm."""
     servo.set_ultrasonic_angle(85)
     time.sleep(SERVO_SETTLE)
@@ -390,14 +464,13 @@ def _scan_right(sensor: UltrasonicSensor, servo: ServoController) -> float:
     return reading.distance_cm if reading.valid else 999.0
 
 
-def _check_side_distance(sensor: UltrasonicSensor, servo: ServoController,
-                         avoid_action: str) -> float:
+def _check_side_distance(sensor, servo, avoid_action):
     """Check distance on the avoidance side to verify the obstacle is passed."""
-    # Avoidance side: if we curved left, obstacle is on right; check right side
     side = "right" if avoid_action == "left" else "left"
     if side == "left":
         return _scan_left(sensor, servo)
     return _scan_right(sensor, servo)
+
 
 # ---- Overlay Drawing ----
 
@@ -418,7 +491,11 @@ def _draw_overlay(frame, detections, state, u_res):
         STATE_AVOID: (0, 165, 255),
         STATE_RECOVER: (255, 255, 0),
     }.get(state, (255, 255, 255))
-    dist_str = f"{u_res.distance_cm:.0f}cm" if u_res.valid else "---"
+
+    if u_res is not None:
+        dist_str = f"{u_res.distance_cm:.0f}cm" if u_res.valid else "---"
+    else:
+        dist_str = "N/A"
     cv2.putText(frame, f"{state} | {dist_str}", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
