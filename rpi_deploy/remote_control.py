@@ -288,45 +288,86 @@ class RemoteControlClient:
 
 SPEED_LEVELS = [0.2, 0.4, 0.6, 0.8, 1.0]
 SPEED_LABELS = ["20%", "40%", "60%", "80%", "100%"]
+KEY_HOLD_TIMEOUT = 0.15  # Seconds without key press before auto-stop
 
 
-def _get_key():
-    """Cross-platform non-blocking single keypress."""
-    if sys.platform == 'win32':
-        import msvcrt
-        if msvcrt.kbhit():
+class _KeyReader:
+    """Cross-platform keyboard reader. Opens raw mode once, reads fast."""
+
+    def __init__(self):
+        self._pressed_keys: set = set()
+        self._last_key_time: float = 0.0
+        self._fd = None
+        self._old_settings = None
+        self._is_windows = sys.platform == 'win32'
+        self._open()
+
+    def _open(self):
+        if self._is_windows:
+            return
+        import termios, tty
+        self._fd = sys.stdin.fileno()
+        self._old_settings = termios.tcgetattr(self._fd)
+        tty.setcbreak(self._fd)
+
+    def close(self):
+        if not self._is_windows and self._old_settings is not None:
+            import termios
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_settings)
+
+    def poll(self) -> set:
+        """Return the set of currently held movement/action keys."""
+        while True:
+            key = self._read_one()
+            if key is None:
+                break
+            self._pressed_keys.add(key)
+            self._last_key_time = time.time()
+        # Check for expired keys (key repeat keeps them alive)
+        if time.time() - self._last_key_time > KEY_HOLD_TIMEOUT:
+            # Remove movement keys; keep non-movement (speed, servo, etc.)
+            movement = {'w', 'W', 'a', 'A', 's', 'S', 'd', 'D',
+                        'up', 'down', 'left', 'right', ' '}
+            self._pressed_keys -= movement
+        return self._pressed_keys.copy()
+
+    def _read_one(self):
+        """Read one key event (non-blocking). Returns key string or None."""
+        if self._is_windows:
+            import msvcrt
+            if not msvcrt.kbhit():
+                return None
             ch = msvcrt.getwch()
             if ch in ('\x00', '\xe0'):
                 ch2 = msvcrt.getwch()
                 mapping = {'H': 'up', 'P': 'down', 'K': 'left', 'M': 'right'}
                 return mapping.get(ch2, ch2)
             return ch
-        return None
-    else:
-        import select
-        import tty
-        import termios
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-        try:
-            tty.setcbreak(fd)
-            if select.select([sys.stdin], [], [], 0.05)[0]:
-                ch = sys.stdin.read(1)
-                if ch == '\x1b':
-                    ch2 = sys.stdin.read(1)
-                    if ch2 == '[':
-                        ch3 = sys.stdin.read(1)
-                        mapping = {'A': 'up', 'B': 'down', 'C': 'right', 'D': 'left'}
-                        return mapping.get(ch3, ch3)
-                    return ch2
-                return ch
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        return None
+        else:
+            import select
+            if not select.select([sys.stdin], [], [], 0.0)[0]:
+                return None
+            ch = sys.stdin.read(1)
+            if ch == '\x1b':
+                # Arrow key escape sequence — wait up to 50ms for rest
+                if not select.select([sys.stdin], [], [], 0.05)[0]:
+                    return '\x1b'  # Standalone Escape
+                ch2 = sys.stdin.read(1)
+                if ch2 != '[':
+                    return ch2  # Not an arrow key
+                if not select.select([sys.stdin], [], [], 0.05)[0]:
+                    return '['  # Incomplete sequence
+                ch3 = sys.stdin.read(1)
+                mapping = {'A': 'up', 'B': 'down', 'C': 'right', 'D': 'left'}
+                return mapping.get(ch3, ch3)
+            return ch
 
 
 def run_local():
-    """Direct WASD keyboard control on the RPi — drives motors/servos locally."""
+    """Direct WASD keyboard control on the RPi.
+    Hold key to move, release to auto-stop (150ms).
+    Supports holding two keys (W+A = forward-left curve)."""
+
     # Import hardware drivers
     try:
         import os
@@ -339,6 +380,7 @@ def run_local():
 
     servo = None
     ultrasonic = None
+    has_servo = False
     try:
         from rpi_deploy.servo_controller import ServoController
         from rpi_deploy.ultrasonic_sensor import UltrasonicSensor
@@ -347,85 +389,129 @@ def run_local():
         servo.center_ultrasonic()
         has_servo = True
     except Exception:
-        has_servo = False
+        pass
 
     motor = MotorController()
-    speed_idx = 1  # 40%
-    us_angle = 120.0  # hardware center
+    speed_idx = 1
+    us_angle = 120.0
+    reader = _KeyReader()
+    last_direction = "---"
 
     print(f"""
-{'='*50}
+{'='*52}
   Local WASD Control — Raspberry Pi Direct
-{'='*50}
-  W / ↑  Forward         S / ↓  Backward
-  A / ←  Turn Left       D / →  Turn Right
-  Space  Stop            Q      Quit
+{'='*52}
+  Hold to move, release to auto-stop (150ms)
+  W/↑  Forward        S/↓  Backward
+  A/←  Turn Left      D/→  Turn Right
+  W+A / W+D  Curve (hold two keys)
+  Space  Stop         Q  Quit
 
-  1-5    Speed ({', '.join(SPEED_LABELS)})
-
-  U/J    Ultrasonic servo left/right
-  R      Read ultrasonic distance
-  C      Center servo
-{'='*50}
+  1-5  Speed ({', '.join(SPEED_LABELS)})
+  U/J  Ultrasonic servo ←/→   R  Distance   C  Center
+{'='*52}
   Speed: {SPEED_LABELS[speed_idx]}
-{'='*50}
+{'='*52}
 """)
 
     try:
         while True:
-            key = _get_key()
-            if key is None:
-                time.sleep(0.02)
-                continue
-
+            keys = reader.poll()
             speed = SPEED_LEVELS[speed_idx]
+            moved = False
 
-            if key in ('w', 'W', 'up'):
-                motor.move_forward(speed)
-                print(f"  Forward @ {SPEED_LABELS[speed_idx]}")
-            elif key in ('s', 'S', 'down'):
-                motor.move_backward(speed)
-                print(f"  Backward @ {SPEED_LABELS[speed_idx]}")
-            elif key in ('a', 'A', 'left'):
-                motor.turn_left(speed)
-                print(f"  Turn Left @ {SPEED_LABELS[speed_idx]}")
-            elif key in ('d', 'D', 'right'):
-                motor.turn_right(speed)
-                print(f"  Turn Right @ {SPEED_LABELS[speed_idx]}")
-            elif key == ' ':
+            # ---- Directional input (supports combos) ----
+            fwd = bool({'w', 'W', 'up'} & keys)
+            back = bool({'s', 'S', 'down'} & keys)
+            left = bool({'a', 'A', 'left'} & keys)
+            stop = bool({' '} & keys)
+
+            if stop:
                 motor.stop()
-                print("  Stop")
+                moved = True
+                cur_dir = "STOP"
+            elif fwd and left:
+                motor.curve_move(speed, -0.5)
+                moved = True
+                cur_dir = "Fwd+Left"
+            elif fwd and bool({'d', 'D', 'right'} & keys):
+                motor.curve_move(speed, 0.5)
+                moved = True
+                cur_dir = "Fwd+Right"
+            elif back and left:
+                motor.curve_move(-speed, -0.5)
+                moved = True
+                cur_dir = "Back+Left"
+            elif back and bool({'d', 'D', 'right'} & keys):
+                motor.curve_move(-speed, 0.5)
+                moved = True
+                cur_dir = "Back+Right"
+            elif fwd:
+                motor.move_forward(speed)
+                moved = True
+                cur_dir = "Forward"
+            elif back:
+                motor.move_backward(speed)
+                moved = True
+                cur_dir = "Backward"
+            elif left:
+                motor.turn_left(speed)
+                moved = True
+                cur_dir = "Left"
+            elif bool({'d', 'D', 'right'} & keys):
+                motor.turn_right(speed)
+                moved = True
+                cur_dir = "Right"
+            else:
+                motor.stop()
+                cur_dir = "---"
 
-            elif key in '12345':
-                speed_idx = int(key) - 1
-                print(f"  Speed → {SPEED_LABELS[speed_idx]}")
+            if cur_dir != last_direction:
+                if moved:
+                    print(f"  {cur_dir:<12} @ {SPEED_LABELS[speed_idx]}")
+                last_direction = cur_dir
 
-            elif key in ('u', 'U') and has_servo:
-                us_angle = max(30, us_angle - 20)
-                servo.set_ultrasonic_angle(us_angle)
-                print(f"  US Servo → {us_angle:.0f}°")
-            elif key in ('j', 'J') and has_servo:
-                us_angle = min(180, us_angle + 20)
-                servo.set_ultrasonic_angle(us_angle)
-                print(f"  US Servo → {us_angle:.0f}°")
-            elif key in ('r', 'R') and ultrasonic is not None:
-                reading = ultrasonic.measure_once()
-                if reading.valid:
-                    print(f"  Distance: {reading.distance_cm:.1f} cm")
-                else:
-                    print("  Distance: ---")
-            elif key in ('c', 'C') and has_servo:
-                us_angle = 120.0
-                servo.center_ultrasonic()
-                print("  Servo centered")
+            # ---- Non-movement keys (one-shot) ----
+            for key in keys:
+                if key in '12345':
+                    speed_idx = int(key) - 1
+                    print(f"  Speed → {SPEED_LABELS[speed_idx]}")
+                    reader._pressed_keys.discard(key)
+                elif key in ('u', 'U') and has_servo:
+                    us_angle = max(30, us_angle - 20)
+                    servo.set_ultrasonic_angle(us_angle)
+                    print(f"  US → {us_angle:.0f}°")
+                    reader._pressed_keys.discard(key)
+                elif key in ('j', 'J') and has_servo:
+                    us_angle = min(180, us_angle + 20)
+                    servo.set_ultrasonic_angle(us_angle)
+                    print(f"  US → {us_angle:.0f}°")
+                    reader._pressed_keys.discard(key)
+                elif key in ('r', 'R') and ultrasonic is not None:
+                    reading = ultrasonic.measure_once()
+                    d = f"{reading.distance_cm:.1f}cm" if reading.valid else "---"
+                    print(f"  Distance: {d}")
+                    reader._pressed_keys.discard(key)
+                elif key in ('c', 'C') and has_servo:
+                    us_angle = 120.0
+                    servo.center_ultrasonic()
+                    print("  Servo centered")
+                    reader._pressed_keys.discard(key)
+                elif key in ('q', 'Q', '\x1b'):
+                    print("\n[Quit]")
+                    reader.close()
+                    motor.stop()
+                    motor.cleanup()
+                    if servo is not None:
+                        servo.cleanup()
+                    return
 
-            elif key in ('q', 'Q', '\x1b'):
-                print("\n[Quit] Stopping and exiting...")
-                break
+            time.sleep(0.04)  # ~25 Hz polling
 
     except KeyboardInterrupt:
         print("\n[Interrupted]")
     finally:
+        reader.close()
         motor.stop()
         motor.cleanup()
         if servo is not None:
