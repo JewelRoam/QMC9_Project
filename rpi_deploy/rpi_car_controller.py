@@ -27,15 +27,17 @@ from rpi_deploy.servo_controller import ServoController
 
 # Ultrasonic thresholds (cm)
 EMERGENCY_DIST = 10.0      # Hard stop
-OBSTACLE_DIST = 40.0       # Trigger servo scan + avoidance (close range)
-WARNING_DIST = 80.0        # Servo-scan based proactive avoidance (YOLO unreliable alone)
+OBSTACLE_DIST = 50.0       # Trigger servo scan + avoidance
 
 # Speed settings (0.0-1.0 gpiozero scale)
 CRUISE_SPEED = 0.2
 AVOID_BACKUP_SPEED = 0.3
 AVOID_TURN_SPEED = 0.2     # Gentle differential turn
+RECOVER_SPEED = 0.2        # Speed during heading recovery
 RECOVERY_BACKUP_DURATION = 0.3
 RECOVERY_TURN_DURATION = 0.6  # ~90° arc, not 180° spin
+RECOVER_DURATION = 1.0     # Time to steer back toward original heading (seconds)
+RECOVER_STEER_RATIO = 0.35 # Counter-steer intensity (0.0-1.0)
 
 # Servo settle time (seconds)
 SERVO_SETTLE = 0.25
@@ -56,6 +58,7 @@ MAIN_LOOP_INTERVAL = 0.083  # ~12 FPS for ultrasonic safety checks
 STATE_CRUISE = "CRUISE"
 STATE_BLOCKED = "BLOCKED"
 STATE_AVOID = "AVOID"
+STATE_RECOVER = "RECOVER"
 
 
 def main():
@@ -112,6 +115,7 @@ def main():
     last_log_time = 0
     avoid_action = None
     avoid_start_time = 0
+    recover_start_time = 0
     consecutive_blocked = 0
 
     # Cached detections (reused between YOLO frames)
@@ -140,7 +144,7 @@ def main():
 
             # ---- Read camera (only on YOLO frames or GUI frames) ----
             frame = None
-            run_yolo = (yolo_frame_count % YOLO_FRAME_INTERVAL == 0) and state != STATE_AVOID
+            run_yolo = (yolo_frame_count % YOLO_FRAME_INTERVAL == 0) and state not in (STATE_AVOID, STATE_RECOVER)
 
             if run_yolo or not args.headless:
                 ret, frame = cap.read()
@@ -187,23 +191,6 @@ def main():
                         print(f"[BLOCKED] Front: {front_dist:.1f}cm")
                         last_log_time = time.time()
 
-                elif front_dist < WARNING_DIST:
-                    # WARNING: obstacle ahead, steer away using YOLO screen-side bias
-                    out = planner.compute(0, 0, 0, 5.0, 3.0, 0, cached_apf_obs)
-                    steer = out.target_steering * 0.6
-
-                    if abs(steer) < 0.05 and cached_apf_obs:
-                        closest = min(cached_apf_obs, key=lambda o: o.distance)
-                        if closest.y > 0.05:
-                            steer = -0.4
-                        elif closest.y < -0.05:
-                            steer = 0.4
-
-                    motor.curve_move(CRUISE_SPEED * 0.4, steer)
-                    if time.time() - last_log_time > 1.5:
-                        print(f"[WARN] F={front_dist:.0f} Det:{len(cached_apf_obs)} steer={steer:.2f}")
-                        last_log_time = time.time()
-
                 else:
                     # Clear -> forward with APF steering + screen-side bias
                     out = planner.compute(0, 0, 0, 8.0, 3.0, 0, cached_apf_obs)
@@ -212,9 +199,9 @@ def main():
                     if abs(steer) < 0.05 and cached_apf_obs:
                         closest = min(cached_apf_obs, key=lambda o: o.distance)
                         if closest.y > 0.05:
-                            steer = -0.3  # obstacle on right → steer left
+                            steer = -0.3  # obstacle on right -> steer left
                         elif closest.y < -0.05:
-                            steer = 0.3   # obstacle on left → steer right
+                            steer = 0.3   # obstacle on left -> steer right
 
                     if not out.emergency_brake and out.target_speed > 0.1:
                         motor.curve_move(CRUISE_SPEED, steer)
@@ -284,10 +271,33 @@ def main():
                     if front_after.valid and front_after.distance_cm < OBSTACLE_DIST:
                         state = STATE_BLOCKED
                     else:
-                        consecutive_blocked = max(0, consecutive_blocked - 1)
-                        state = STATE_CRUISE
-                        print(f"[CRUISE] Resumed (front={front_after.distance_cm:.1f}cm)")
+                        # Enter recovery: steer back toward original heading
+                        state = STATE_RECOVER
+                        recover_start_time = time.time()
+                        print(f"[RECOVER] Heading back (avoid was {avoid_action})")
 
+            elif state == STATE_RECOVER:
+                # Steer opposite to avoidance direction to return to original heading
+                counter_steer = RECOVER_STEER_RATIO
+                if avoid_action == "left":
+                    motor.curve_move(RECOVER_SPEED, counter_steer)   # was left -> steer right
+                else:
+                    motor.curve_move(RECOVER_SPEED, -counter_steer)  # was right -> steer left
+
+                elapsed = time.time() - recover_start_time
+                if elapsed >= RECOVER_DURATION:
+                    consecutive_blocked = max(0, consecutive_blocked - 1)
+                    state = STATE_CRUISE
+                    front_check = ultrasonic.measure_once()
+                    dist_str = f"{front_check.distance_cm:.1f}cm" if front_check.valid else "---"
+                    print(f"[CRUISE] Resumed (front={dist_str})")
+                else:
+                    # Check for obstacles during recovery
+                    front_check = ultrasonic.measure_once()
+                    if front_check.valid and front_check.distance_cm < OBSTACLE_DIST:
+                        motor.stop()
+                        state = STATE_BLOCKED
+                        consecutive_blocked += 1
             # ---- Visual Overlay (only on frames we already read) ----
             if not args.headless and frame is not None:
                 _draw_overlay(frame, cached_detections, state, u_res)
@@ -343,6 +353,7 @@ def _draw_overlay(frame, detections, state, u_res):
         STATE_CRUISE: (0, 255, 0),
         STATE_BLOCKED: (0, 0, 255),
         STATE_AVOID: (0, 165, 255),
+        STATE_RECOVER: (255, 255, 0),
     }.get(state, (255, 255, 255))
     dist_str = f"{u_res.distance_cm:.0f}cm" if u_res.valid else "---"
     cv2.putText(frame, f"{state} | {dist_str}", (10, 30),
