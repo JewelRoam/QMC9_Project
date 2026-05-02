@@ -115,6 +115,7 @@ def main():
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("[ERROR] Could not open camera device.")
+        motor.cleanup()
         return
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
@@ -122,22 +123,28 @@ def main():
 
     # ---- AI Init ----
     print("[INIT] Loading YOLO11n ONNX...")
-    detector = YOLODetector({
-        "use_onnx": True,
-        "imgsz": 640,
-        "confidence_threshold": YOLO_CONFIDENCE_THRESHOLD,
-    })
-    planner = APFPlanner({
-        "k_attractive": 1.5,
-        "k_repulsive": 180.0,
-        "d0": 2.2,
-        "emergency_distance": 0.30,
-        "max_speed": 10.0,
-    })
+    try:
+        detector = YOLODetector({
+            "use_onnx": True,
+            "imgsz": 640,
+            "confidence_threshold": YOLO_CONFIDENCE_THRESHOLD,
+        })
+        planner = APFPlanner({
+            "k_attractive": 1.5,
+            "k_repulsive": 180.0,
+            "d0": 2.2,
+            "emergency_distance": 0.30,
+            "max_speed": 10.0,
+        })
 
-    # Warmup
-    print("[INIT] Warming up inference...")
-    detector.detect(np.zeros((320, 320, 3), dtype=np.uint8))
+        # Warmup
+        print("[INIT] Warming up inference...")
+        detector.detect(np.zeros((320, 320, 3), dtype=np.uint8))
+    except Exception as e:
+        print(f"[ERROR] AI init failed: {e}")
+        motor.cleanup()
+        cap.release()
+        return
 
     print("\n" + "=" * 40)
     mode_str = "ULTRASONIC" if args.enable_ultrasonic else "YOLO-ONLY"
@@ -146,9 +153,17 @@ def main():
 
     rt = RuntimeState()
 
+    # Pre-computed: states where YOLO is skipped (ultrasonic mode only)
+    skip_yolo_states = (STATE_AVOID, STATE_BLOCKED) if args.enable_ultrasonic else ()
+
     try:
         while True:
             loop_start = time.perf_counter()
+
+            # ---- Always drain camera buffer to avoid stale frames ----
+            ret, frame = cap.read()
+            if not ret:
+                frame = None
 
             # ---- Ultrasonic emergency check ----
             u_res = None
@@ -166,19 +181,11 @@ def main():
                     if time.time() - rt.last_log_time > 1.0:
                         print(f"!! EMERGENCY STOP: {u_res.distance_cm:.1f}cm")
                         rt.last_log_time = time.time()
-                    cap.read()
                     time.sleep(0.05)
                     continue
 
-            # ---- Read camera ----
-            frame = None
-            skip_yolo_states = (STATE_AVOID, STATE_BLOCKED) if args.enable_ultrasonic else ()
+            # ---- YOLO Perception ----
             run_yolo = (rt.yolo_frame_count % YOLO_FRAME_INTERVAL == 0) and rt.state not in skip_yolo_states
-
-            if run_yolo or not args.headless:
-                ret, frame = cap.read()
-                if not ret:
-                    frame = None
 
             if run_yolo and frame is not None:
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -261,24 +268,7 @@ def _tick_yolo(rt: RuntimeState, motor, planner):
                 print("[BLOCKED] Large center detection")
                 rt.last_log_time = time.time()
         else:
-            out = planner.compute(0, 0, 0, 8.0, 3.0, 0, rt.cached_apf_obs)
-            steer = out.target_steering * 0.4
-
-            if abs(steer) < 0.05 and rt.cached_apf_obs:
-                closest = min(rt.cached_apf_obs, key=lambda o: o.distance)
-                if closest.y > 0.05:
-                    steer = -0.3
-                elif closest.y < -0.05:
-                    steer = 0.3
-
-            if not out.emergency_brake and out.target_speed > 0.1:
-                motor.curve_move(CRUISE_SPEED, steer)
-            else:
-                motor.stop()
-
-            if time.time() - rt.last_log_time > 3.0:
-                print(f"[CRUISE] Det:{len(rt.cached_apf_obs)} steer={steer:.2f}")
-                rt.last_log_time = time.time()
+            _apf_cruise(rt, motor, planner, CRUISE_SPEED)
 
     elif rt.state == STATE_BLOCKED:
         motor.move_backward(AVOID_BACKUP_SPEED)
@@ -309,24 +299,7 @@ def _tick_ultrasonic(rt: RuntimeState, motor, ultrasonic, servo, planner, front_
                 print(f"[BLOCKED] Front: {front_dist:.1f}cm")
                 rt.last_log_time = time.time()
         else:
-            out = planner.compute(0, 0, 0, 8.0, 3.0, 0, rt.cached_apf_obs)
-            steer = out.target_steering * 0.4
-
-            if abs(steer) < 0.05 and rt.cached_apf_obs:
-                closest = min(rt.cached_apf_obs, key=lambda o: o.distance)
-                if closest.y > 0.05:
-                    steer = -0.3
-                elif closest.y < -0.05:
-                    steer = 0.3
-
-            if not out.emergency_brake and out.target_speed > 0.1:
-                motor.curve_move(CRUISE_SPEED, steer)
-            else:
-                motor.stop()
-
-            if time.time() - rt.last_log_time > 3.0:
-                print(f"[CRUISE] F:{front_dist:.0f}cm Det:{len(rt.cached_apf_obs)} steer={steer:.2f}")
-                rt.last_log_time = time.time()
+            _apf_cruise(rt, motor, planner, CRUISE_SPEED)
 
     elif rt.state == STATE_BLOCKED:
         motor.move_backward(AVOID_BACKUP_SPEED)
@@ -408,18 +381,7 @@ def _tick_ultrasonic(rt: RuntimeState, motor, ultrasonic, servo, planner, front_
             rt.state = STATE_CRUISE
 
     elif rt.state == STATE_RECOVER:
-        out = planner.compute(0, 0, 0, 8.0, 3.0, 0, rt.cached_apf_obs)
-        steer = out.target_steering * 0.4
-        if abs(steer) < 0.05 and rt.cached_apf_obs:
-            closest = min(rt.cached_apf_obs, key=lambda o: o.distance)
-            if closest.y > 0.05:
-                steer = -0.3
-            elif closest.y < -0.05:
-                steer = 0.3
-        if not out.emergency_brake and out.target_speed > 0.1:
-            motor.curve_move(RECOVER_SPEED, steer)
-        else:
-            motor.curve_move(RECOVER_SPEED, 0.0)
+        _apf_cruise(rt, motor, planner, RECOVER_SPEED)
 
         now = time.time()
         if now - rt.last_side_check_time >= SERVO_SIDE_CHECK_INTERVAL:
@@ -444,6 +406,32 @@ def _tick_ultrasonic(rt: RuntimeState, motor, ultrasonic, servo, planner, front_
                 rt.side_cleared = False
                 rt.state = STATE_BLOCKED
                 rt.consecutive_blocked += 1
+
+
+# ================================================================
+# Shared helpers
+# ================================================================
+
+def _apf_cruise(rt: RuntimeState, motor, planner, speed: float):
+    """Run APF planning and apply steering. Shared by both modes."""
+    out = planner.compute(0, 0, 0, 8.0, 3.0, 0, rt.cached_apf_obs)
+    steer = out.target_steering * 0.4
+
+    if abs(steer) < 0.05 and rt.cached_apf_obs:
+        closest = min(rt.cached_apf_obs, key=lambda o: o.distance)
+        if closest.y > 0.05:
+            steer = -0.3
+        elif closest.y < -0.05:
+            steer = 0.3
+
+    if not out.emergency_brake and out.target_speed > 0.1:
+        motor.curve_move(speed, steer)
+    else:
+        motor.stop()
+
+    if time.time() - rt.last_log_time > 3.0:
+        print(f"[CRUISE] Det:{len(rt.cached_apf_obs)} steer={steer:.2f}")
+        rt.last_log_time = time.time()
 
 
 # ---- Servo Scan Helpers ----
