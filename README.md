@@ -6,7 +6,7 @@
 
 *Interconnected Hub (Nexus) · Autonomous Navigation (Pilot)*
 
-[![Python](https://img.shields.io/badge/Python-3.8+-3776AB?logo=python&logoColor=white)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.7-3776AB?logo=python&logoColor=white)](https://python.org)
 [![CARLA](https://img.shields.io/badge/CARLA-0.9.13-FF6F00?logo=carla&logoColor=white)](https://carla.org)
 [![YOLO](https://img.shields.io/badge/YOLO-v11n-00FFFF?logo=yolo&logoColor=black)](https://ultralytics.com)
 [![Platform](https://img.shields.io/badge/Platform-CARLA%20%7C%20RPi5-blueviolet)](#-how-to-run)
@@ -98,10 +98,4 @@ python rpi_deploy/ultrasonic_sensor.py
 python rpi_deploy/motor_driver.py
 ```
 
-## 📄 Documentation
-
-The technical details, mathematical derivations, and comprehensive experimental analysis are documented in the final thesis:
-- 📖 **[QMC9_Final_Report.pdf](https://github.com/JewelRoam/QMC9_project_docs)**
-
 ---
-*This project is submitted as part of the undergraduate degree programme at Queen Mary University of London and Beijing University of Posts and Telecommunications.*
